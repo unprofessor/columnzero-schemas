@@ -336,13 +336,16 @@ def write_json(path: Path, value: Any) -> None:
 
 
 def release_index(project: str, compat: str, version: str, records: list[dict[str, str]]) -> dict[str, Any]:
-    """Describe one release from its catalog records.
+    """Describe one release: its membership, digests, dialects, and publication time.
 
-    Built from the catalog rather than from the current lockfile, so every release that
-    has ever been published has an index - not just the ones this build happens to name.
-    Its membership is fixed, so the index is immutable too.
+    This is the tree's own record of a release.  Everything the catalog holds is
+    derivable from these plus the directory names around them, which is why nothing in
+    the build ever reads the catalog back.
     """
-    return {
+    published_at = next(
+        (record["published_at"] for record in records if record.get("published_at")), None
+    )
+    index: dict[str, Any] = {
         "project": project,
         "version": version,
         "compat": compat,
@@ -356,6 +359,9 @@ def release_index(project: str, compat: str, version: str, records: list[dict[st
             for record in sorted(records, key=lambda record: record["schema"])
         ],
     }
+    if published_at is not None:
+        index["published_at"] = published_at
+    return index
 
 
 def stable_version_key(version: str) -> tuple[int, int, int, str]:
@@ -424,34 +430,127 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def looks_like_catalog(path: Path) -> bool:
-    """Whether a legacy /index.json is the old catalog rather than the new root index."""
-    try:
-        value = json.loads(path.read_text())
-    except json.JSONDecodeError:
-        return False
-    return isinstance(value, dict) and "schema_catalog" in value
+def read_published(site: Path, base_url: str) -> list[dict[str, str]]:
+    """Read what the tree says is published, checking its own indexes as it goes.
 
+    The filesystem is the record.  Directory names give project, compat line, and
+    version; the release index gives membership, dialects, and publication time; the
+    bytes give the digests.  Each index is also a witness for the level below it, so a
+    version its line index lists but that no longer exists - or a schema its release
+    index lists but that is gone - is caught here, before the build regenerates the
+    index that would otherwise have quietly stopped mentioning it.
 
-def require_catalog_record(record: Any) -> None:
-    """Validate a record read back from the published catalog.
-
-    Records are re-read from a tree we published, but they go on to build paths that are
-    written to and deleted from, so they get the same checks as artifact data rather
-    than being trusted for having been ours once.
+    A tree published before those indexes existed simply offers fewer witnesses.  The
+    walk still finds everything; only the cross-checks it cannot make are skipped.
     """
-    if not isinstance(record, dict):
-        raise ValidationError("catalog entries must be objects")
-    for field in ("project", "version", "schema", "compat", "dialect", "url", "sha256"):
-        if not isinstance(record.get(field), str):
-            raise ValidationError(f"catalog entry is missing a string {field}")
-    require_safe_segment(record["project"], "catalog project")
-    require_safe_segment(record["version"], "catalog version")
-    stable_version_key(record["version"])
-    require_compat_line(record["compat"])
-    require_schema_basename(record["schema"])
-    if not re.fullmatch(r"[0-9a-f]{64}", record["sha256"]):
-        raise ValidationError(f"catalog entry has a malformed sha256: {record['sha256']!r}")
+    records: list[dict[str, str]] = []
+    if not site.is_dir():
+        return records
+    root = base_url.rstrip("/")
+    projects = sorted(entry for entry in site.iterdir() if entry.is_dir())
+    vouches_for(site / "index.json", "projects", [entry.name for entry in projects], "project")
+    for project_dir in projects:
+        project = project_dir.name
+        require_safe_segment(project, "published project")
+        lines = sorted(entry for entry in project_dir.glob("v*") if entry.is_dir())
+        vouches_for(
+            project_dir / "index.json",
+            "compat_lines",
+            [entry.name[1:] for entry in lines],
+            f"{project} compat line",
+        )
+        for line_dir in lines:
+            compat = line_dir.name[1:]
+            require_compat_line(compat)
+            releases = sorted(entry for entry in line_dir.iterdir() if entry.is_dir())
+            vouches_for(
+                line_dir / "index.json",
+                "versions",
+                [entry.name for entry in releases],
+                f"{project} v{compat} release",
+            )
+            for release_dir in releases:
+                version = release_dir.name
+                require_safe_segment(version, "published version")
+                stable_version_key(version)
+                records.extend(read_release(release_dir, root, project, compat, version))
+    return records
+
+
+def vouches_for(index_path: Path, field: str, present: list[str], label: str) -> None:
+    """An index names what should exist one level down; nothing it names may be gone."""
+    if not index_path.is_file():
+        return
+    listed = read_json_object(index_path).get(field)
+    if not isinstance(listed, list):
+        return
+    for name in listed:
+        if isinstance(name, str) and name not in present:
+            raise ImmutabilityError(
+                f"published {label} {name!r} is listed by {index_path.name}"
+                " but no longer exists"
+            )
+
+
+def read_release(
+    release_dir: Path, root: str, project: str, compat: str, version: str
+) -> list[dict[str, str]]:
+    """Records for one release directory, cross-checked against its own index."""
+    on_disk = sorted(
+        entry.name
+        for entry in release_dir.iterdir()
+        if entry.is_file() and entry.name != "index.json"
+    )
+    index_path = release_dir / "index.json"
+    listed: dict[str, dict[str, str]] = {}
+    published_at: Any = None
+    if index_path.is_file():
+        index = read_json_object(index_path)
+        published_at = index.get("published_at")
+        for entry in index.get("schemas", []):
+            if not isinstance(entry, dict) or not isinstance(entry.get("schema"), str):
+                raise ValidationError(f"{index_path}: malformed schema entry")
+            listed[entry["schema"]] = entry
+        if sorted(listed) != on_disk:
+            raise ImmutabilityError(
+                f"published release {project} {version} no longer matches its index:"
+                f" index lists {sorted(listed)}, directory holds {on_disk}"
+            )
+    records: list[dict[str, str]] = []
+    for name in on_disk:
+        require_schema_basename(name)
+        body = (release_dir / name).read_bytes()
+        digest = hashlib.sha256(body).hexdigest()
+        entry = listed.get(name, {})
+        if entry.get("sha256") and entry["sha256"] != digest:
+            raise ImmutabilityError(
+                f"published resource was modified: {project}/v{compat}/{version}/{name}"
+            )
+        record = {
+            "project": project,
+            "version": version,
+            "schema": name,
+            "compat": compat,
+            "dialect": entry.get("dialect") or declared_dialect(release_dir / name, body),
+            "url": entry.get("url") or f"{root}/{project}/v{compat}/{version}/{name}",
+            "sha256": digest,
+        }
+        if isinstance(published_at, str):
+            record["published_at"] = published_at
+        records.append(record)
+    return records
+
+
+def declared_dialect(path: Path, body: bytes) -> str:
+    """Fall back to the schema's own $schema when no release index records it."""
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise ValidationError(f"{path}: published schema is not valid JSON") from error
+    dialect = value.get("$schema") if isinstance(value, dict) else None
+    if not isinstance(dialect, str):
+        raise ValidationError(f"{path}: published schema declares no $schema")
+    return dialect
 
 
 def require_release_membership(
@@ -523,24 +622,6 @@ def audit_release_snapshot(site: Path, snapshot: dict[str, str]) -> None:
             raise ImmutabilityError(f"published resource was modified: {relative}")
 
 
-def audit_published_catalog(site: Path, records: list[dict[str, str]]) -> None:
-    """Verify the published record and the published bytes still agree.
-
-    This is not a second copy of `audit_release_snapshot`.  The snapshot compares the
-    tree to itself and so can only see damage this build caused; it would accept a
-    resource that went missing yesterday as the new baseline.  The catalog is a
-    committed record of what was published, so comparing against it catches damage that
-    predates the build - an out-of-band deletion, a bad merge, a partial push - which
-    would otherwise leave the catalog advertising a URL that 404s.
-    """
-    for record in records:
-        path = site / record["project"] / f"v{record['compat']}" / record["version"] / record["schema"]
-        if not path.is_file():
-            raise ImmutabilityError(f"previously published resource is missing: {path}")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]:
-            raise ImmutabilityError(f"previously published resource changed: {path}")
-
-
 def build_site(
     base_url: str,
     artifacts: list[LockedArtifact],
@@ -551,27 +632,13 @@ def build_site(
     documents = fetch_document_set(base_url, artifacts, on_download)
     site.mkdir(parents=True, exist_ok=True)
     releases_before = snapshot_releases(site)
-    catalog_by_key: dict[tuple[str, str, str], dict[str, str]] = {}
-    source = site / "catalog.json"
-    if not source.exists():
-        # The catalog used to live at /index.json, which is now the root index. Migrate
-        # from it once, but only when that file really is a catalog.
-        legacy = site / "index.json"
-        source = legacy if legacy.exists() and looks_like_catalog(legacy) else None
-    if source is not None:
-        existing = read_json_object(source)
-        if "schema_catalog" not in existing:
-            # Only reachable for catalog.json. Falling through here instead would make a
-            # damaged record indistinguishable from a fresh site, and the build would
-            # quietly delete every alias and index for lines it had forgotten.
-            raise ValidationError(f"{source.name} exists but is not a schema catalog")
-        schemas = existing.get("schemas", [])
-        if not isinstance(schemas, list):
-            raise ValidationError(f"{source.name} schemas must be an array")
-        for record in schemas:
-            require_catalog_record(record)
-            catalog_by_key[(record["project"], record["version"], record["schema"])] = record
-    published_before = list(catalog_by_key.values())
+    # What is already published, read from the tree itself.  Nothing reads the catalog
+    # back: it is derived output, so trusting it would only be trusting a copy.
+    published_before = read_published(site, base_url)
+    catalog_by_key: dict[tuple[str, str, str], dict[str, str]] = {
+        (record["project"], record["version"], record["schema"]): record
+        for record in published_before
+    }
     require_release_membership(published_before, documents)
     aliases: dict[tuple[str, str, str], SchemaDocument] = {}
     latest: dict[tuple[str, str], SchemaDocument] = {}
@@ -679,6 +746,8 @@ def build_site(
         catalog_by_key.values(),
         key=lambda record: (record["project"], stable_version_key(record["version"]), record["schema"]),
     )
+    # Derived output for consumers: one fetch instead of a crawl.  Regenerated whole
+    # from the tree every run, so it can never be a stale or poisoned input.
     write_json(site / "catalog.json", {"schema_catalog": 1, "schemas": catalog})
     write_json(site / "index.json", {
         "schema_site": 1,
@@ -699,7 +768,6 @@ def build_site(
         # *.github.io URL down with it, so opting out has to remove the file.
         cname.unlink()
     audit_release_snapshot(site, releases_before)
-    audit_published_catalog(site, published_before)
     return {"published": published, "aliases": len(aliases) + len(latest)}
 
 

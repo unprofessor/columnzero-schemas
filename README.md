@@ -39,7 +39,11 @@ Pages serves at the directory URL. Nothing restates the tree beneath it:
 | `/{project}/v{compat}/{version}/index.json` | the schemas in that release |
 | `/{project}/latest/index.json` | the schemas `latest/` currently serves |
 
-Walking from the root reaches everything published, one fetch per level.
+Walking from the root reaches everything published, one fetch per level. Each
+index is also a *witness* for the level below it: the line index names the
+versions that must exist, the release index names the schemas and their digests.
+That is what makes the tree self-describing, and it is why nothing in the build
+needs a separate record of what was published.
 
 The release index is the only immutable one. It is rebuilt from the catalog on
 every run rather than from the current lockfile, so every release that has ever
@@ -64,16 +68,20 @@ gives you the whole site, where the indexes would take a walk down every level �
 so it is what to use for mirroring or auditing. It is also the record the build
 compares against to detect damage that predates it.
 
-It is not an index, which is why it is not called one; keeping it separate is
-what lets every `index.json` list a single level. It gains an entry with every
-release and never loses one, since canonical resources are never removed, so
-prefer an index when you do not need all of it.
+It is **derived output**. Nothing in the build reads it back — it is regenerated
+whole from the tree on every run, so a stale, corrupt, or tampered catalog cannot
+affect a build; it is simply overwritten. Every field in it comes from the tree:
+the directory names give project, line, and version, and the release index gives
+the rest.
+
+It gains an entry with every release and never loses one, since canonical
+resources are never removed, so prefer an index when you do not need all of it.
 
 `/index.json` used to hold this catalog and is now the root index. A tree
-published under the old layout migrates on its next build. Rolling the publisher
-back after that migration is **not** safe: an older build looks for the catalog
-at `/index.json`, finds none, and republishes a catalog containing only what the
-current lockfile names.
+published under the old layout needs no migration — the walk reads it from the
+directories. Rolling the publisher *back* to a version that read the catalog from
+`/index.json` is not safe: it would find no records there and republish a catalog
+containing only what the current lockfile names.
 
 ## Status
 
@@ -170,36 +178,29 @@ pushes the result back. Both copies exclude `.git`: the published tree is a
 worktree whose `.git` is a file, and a `--delete` sync without that exclusion
 detaches the checkout mid-run.
 
-Four checks protect published bytes, and they fail on different things.
+Four checks protect published bytes, and they fail on different things. **None of
+them reads the catalog** — it is derived output, so trusting it would only mean
+trusting a copy of the tree.
 
-1. **Per-file, while writing.** Writing a canonical resource — a schema or a
+1. **The tree vouching for itself**, read before the build starts. Every index is
+   checked against what actually exists one level down, and every schema is
+   re-hashed against the digest its release index records. This catches damage
+   that predates the build — an out-of-band deletion, a bad merge, a partial
+   push — before the build regenerates the index that would otherwise have
+   quietly stopped mentioning what went missing.
+2. **Release membership.** A release's schema set is compared against what its
+   release index says it contained. Check 3 cannot see this: adding a schema to
+   a published release creates a file with nothing to compare against.
+3. **Per-file, while writing.** Writing a canonical resource — a schema or a
    release index — compares against what is already on disk and aborts on any
-   difference. Because release indexes are rebuilt from the catalog on every
-   run, this catches tampering with one at any later date, and restores one
-   that went missing.
-2. **Release membership.** A release's schema set is compared against what the
-   catalog records it contained. Check 1 cannot see this: adding a schema to a
-   published release creates a file with nothing to compare against.
-3. **Tree against itself.** Every file inside a release directory is digested
-   before the build starts and re-checked afterwards. It needs no record to be
-   correct, so it holds even where the catalog does not. It can only see damage
-   *this build* caused.
-4. **Record against bytes.** Every entry in the previous `/catalog.json` is
-   re-read and re-hashed, catching damage that predates the build — an
-   out-of-band deletion, a bad merge, a partial push — which would otherwise be
-   adopted as the new baseline while the catalog kept advertising a URL that
-   404s.
-
-The catalog is load-bearing for checks 1, 2 and 4, so a `catalog.json` that is
-present but unreadable aborts the build. Treating it as an empty history would
-make damage indistinguishable from a fresh site, and the next run would delete
-every alias and index belonging to a line it had forgotten. Records read back
-from it are revalidated before they are used to build a path, on the same
-grounds: the tree is ours, but being ours is not a safety property.
+   difference.
+4. **Tree against itself, across the build.** Every file inside a release
+   directory is digested before the build and re-checked afterwards, catching
+   anything this build removed or altered.
 
 Structurally, the purge that clears stale aliases walks a compat line file by
 file and never recurses, so no code path in the publisher can remove a release
-directory. Check 3 exists because that is an argument about the code as written,
+directory. Check 4 exists because that is an argument about the code as written,
 not a property the code enforces about itself.
 
 ## Lockfile completeness
