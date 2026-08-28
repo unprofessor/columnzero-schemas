@@ -26,6 +26,69 @@ contents. It validates the schema index, archive safety, artifact SHA-256, JSON
 Schema meta-schema, and canonical `$id`; it refuses to modify or drop an
 existing canonical resource.
 
+## Indexes
+
+Every directory carries an `index.json` listing exactly one level down, which
+Pages serves at the directory URL. Nothing restates the tree beneath it:
+
+| Path | Lists |
+| --- | --- |
+| `/index.json` | projects |
+| `/{project}/index.json` | compat lines, and `latest/` when one exists |
+| `/{project}/v{compat}/index.json` | versions, and the aliases sitting beside them |
+| `/{project}/v{compat}/{version}/index.json` | the schemas in that release |
+| `/{project}/latest/index.json` | the schemas `latest/` currently serves |
+
+Walking from the root reaches everything published, one fetch per level. Because
+each index describes the level below it, the tree is self-describing: the build
+learns what is already published by reading it, and needs no separate record.
+
+No index records *when* a resource went live. `gh-pages` is a git branch, so the
+commit that added the file already says, more accurately than a timestamp copied
+out of a lockfile could:
+
+```sh
+git log --diff-filter=A --format='%aI' origin/gh-pages -- {path}
+```
+
+The release index is the only immutable one. It is rebuilt from the catalog on
+every run rather than from the current lockfile, so every release that has ever
+been published has one — including releases that have since left the lockfile,
+which the line index above them still lists.
+
+A compat line appears as soon as it has any release. A line holding only
+prereleases resolves and lists its versions, but serves no alias, so its
+`schemas` is empty.
+
+## Catalog
+
+`/catalog.json` lists every published schema in one flat file, deliberately
+outside the hierarchy:
+
+```text
+https://schemas.columnzero.com/catalog.json
+```
+
+One entry per schema per release, each with its URL and digest. Fetching it once
+gives you the whole site, where the indexes would take a walk down every level —
+so it is what to use for mirroring or auditing. It is also the record the build
+compares against to detect damage that predates it.
+
+It is **derived output**. Nothing in the build reads it back — it is regenerated
+whole from the tree on every run, so a stale, corrupt, or tampered catalog cannot
+affect a build; it is simply overwritten. Every field in it comes from the tree:
+the directory names give project, line, and version, and the release index gives
+the rest.
+
+It gains an entry with every release and never loses one, since canonical
+resources are never removed, so prefer an index when you do not need all of it.
+
+`/index.json` used to hold this catalog and is now the root index. A tree
+published under the old layout needs no migration — the walk reads it from the
+directories. Rolling the publisher *back* to a version that read the catalog from
+`/index.json` is not safe: it would find no records there and republish a catalog
+containing only what the current lockfile names.
+
 ## Status
 
 `columnzero-schemas` publishes its own contract schema as the first and only
@@ -121,14 +184,37 @@ pushes the result back. Both copies exclude `.git`: the published tree is a
 worktree whose `.git` is a file, and a `--delete` sync without that exclusion
 detaches the checkout mid-run.
 
-Two independent checks protect published bytes. Writing a canonical resource
-compares against what is already on disk and aborts on any difference. Then,
-after the tree is built, every entry in the *previous* catalog is re-read and
-re-hashed: a release that went missing or changed fails the build, whether or
-not the current lockfile still names it.
+Immutability is enforced by **git**, not by anything inside the tree. Once the
+rebuild is staged, the workflow refuses to publish if any path under a release
+directory is reported as modified, deleted, or renamed:
 
-The purge that clears stale aliases walks a compat line file by file and never
-recurses, so no code path in the publisher can remove a release directory.
+```sh
+git diff --cached --name-status | python src/czschemas.py verify
+```
+
+Additions are not violations — publishing a new release is the point.
+
+This is deliberately a check the tree cannot influence. Any record kept *inside*
+the tree is editable by whoever edits the tree: drop the field an index is
+checked on and the check vanishes with it, and a release deleted along with the
+index that listed it leaves nothing behind to notice. The previous commit is not
+reachable from the working copy, so the same edit cannot scrub the evidence.
+
+Git is also where to look for when a resource went live, and for any violation
+committed before this check existed:
+
+```sh
+git log --diff-filter=A  --format='%aI' origin/gh-pages -- {path}
+git log --diff-filter=DM --format='%h %aI %s' --name-only origin/gh-pages
+```
+
+Writing a canonical resource still compares against what is on disk and aborts on
+a difference. That is a convenience — a local build fails at the point of cause,
+with a precise message — not the guarantee. The guarantee is the git check.
+
+Structurally, the purge that clears stale aliases walks a compat line file by
+file and never recurses, so no code path in the publisher can remove a release
+directory.
 
 ## Lockfile completeness
 

@@ -76,13 +76,10 @@ class SelfTestArtifactTests(unittest.TestCase):
     def test_artifact_publishes_to_its_canonical_url(self):
         artifact = czschemas.LockedArtifact(
             project=pack.PROJECT,
-            repo="unprofessor/columnzero-schemas",
             tag=f"schemas-v{pack.RELEASE}",
             version=pack.RELEASE,
-            asset="schemas.tar.gz",
             url=f"https://github.com/unprofessor/columnzero-schemas/releases/download/schemas-v{pack.RELEASE}/schemas.tar.gz",
             sha256=hashlib.sha256(self.payload).hexdigest(),
-            published_at="2026-08-28T00:00:00Z",
         )
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory) / "site"

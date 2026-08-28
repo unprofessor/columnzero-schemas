@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -39,6 +40,12 @@ COMPAT_LINE = re.compile(r"^(?:[1-9]\d*|0\.(?:0|[1-9]\d*))$")
 # Canonical schema files and release directories share a parent, so their names must not
 # be able to collide.  No SemVer version can end in this suffix, and no index.json can.
 SCHEMA_SUFFIX = ".schema.json"
+# {project}/v{compat}/{version}/... - everything below a release directory is canonical.
+CANONICAL_PATH = re.compile(r"^[^/]+/v[^/]+/[^/]+/")
+# The only git statuses that leave every published byte where it was: a file that did
+# not exist before (A), and a copy, whose source survives untouched (C).  Everything
+# else is a violation, including letters git has yet to invent.
+ADDITIVE_STATUSES = frozenset("AC")
 GITHUB_DOWNLOAD_HOSTS = {
     "github.com",
     "objects.githubusercontent.com",
@@ -57,13 +64,10 @@ class ImmutabilityError(ValidationError):
 @dataclasses.dataclass(frozen=True)
 class LockedArtifact:
     project: str
-    repo: str
     tag: str
     version: str
-    asset: str
     url: str
     sha256: str
-    published_at: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -326,9 +330,37 @@ def purge_mutable_paths(site: Path, projects: set[str]) -> None:
                     entry.unlink()
 
 
+def json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    path.write_bytes(json_bytes(value))
+
+
+def release_index(project: str, compat: str, version: str, records: list[dict[str, str]]) -> dict[str, Any]:
+    """Describe one release: its membership, digests, and dialects.
+
+    This is the tree's own record of a release.  Everything the catalog holds is
+    derivable from these plus the directory names around them, which is why nothing in
+    the build ever reads the catalog back.  When a resource went live is not recorded
+    here: `gh-pages` is a git branch, so the commit that added it already says.
+    """
+    return {
+        "project": project,
+        "version": version,
+        "compat": compat,
+        "schemas": [
+            {
+                "schema": record["schema"],
+                "dialect": record["dialect"],
+                "url": record["url"],
+                "sha256": record["sha256"],
+            }
+            for record in sorted(records, key=lambda record: record["schema"])
+        ],
+    }
 
 
 def stable_version_key(version: str) -> tuple[int, int, int, str]:
@@ -347,6 +379,7 @@ def compat_line_for(version: str) -> str:
 
 
 def compat_line_key(line: str) -> tuple[int, int]:
+    require_compat_line(line)
     major, _, minor = line.partition(".")
     return int(major), int(minor or 0)
 
@@ -356,9 +389,9 @@ def alias_record(base_url: str, document: SchemaDocument) -> dict[str, str]:
     return {
         "schema": document.basename,
         "version": document.artifact.version,
+        "dialect": document.dialect,
         "url": canonical_url(base_url, document),
         "sha256": hashlib.sha256(document.body).hexdigest(),
-        "published_at": document.artifact.published_at,
     }
 
 
@@ -385,19 +418,112 @@ def require_alias_coverage(
             )
 
 
-def audit_published_catalog(site: Path, records: list[dict[str, str]]) -> None:
-    """Verify every previously published canonical resource survived the rebuild.
+def read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise ValidationError(f"{path.name} is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise ValidationError(f"{path.name} must contain a JSON object")
+    return value
 
-    The catalog records the URL and digest of each release, so this closes the loop that
-    `atomic_write` cannot: that check only catches a resource that *changed*, while this
-    also catches one that was deleted or truncated by a bug elsewhere in the build.
+
+def changed_canonical_paths(name_status: str) -> list[str]:
+    """Canonical paths that a `git diff --name-status` reports as anything but additive.
+
+    Immutability is enforced against git rather than against anything inside the tree.
+    A record kept in the tree can be edited by whoever edits the tree - drop the field
+    an index is checked on and the check disappears with it - whereas the previous
+    commit is not reachable from the working copy.
+
+    The rule is an allowlist. Naming the bad statuses instead would mean the check is
+    only as complete as that list: `T`, a regular file swapped for a symlink, was
+    missing from exactly such a list, and it leaves the release index byte-identical.
     """
-    for record in records:
-        path = site / record["project"] / f"v{record['compat']}" / record["version"] / record["schema"]
-        if not path.is_file():
-            raise ImmutabilityError(f"previously published resource is missing: {path}")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]:
-            raise ImmutabilityError(f"previously published resource changed: {path}")
+    violations: list[str] = []
+    for line in name_status.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        kind = fields[0][:1]
+        # Renames and copies list the source first, and for a rename it is the path
+        # that disappears; for everything else there is only one path.
+        if kind not in ADDITIVE_STATUSES and CANONICAL_PATH.match(fields[1]):
+            violations.append(f"{kind} {fields[1]}")
+    return violations
+
+
+def read_published(site: Path, base_url: str) -> list[dict[str, str]]:
+    """Read what the tree already publishes.
+
+    The filesystem is the record: directory names give project, compat line, and
+    version, the release index gives dialects and canonical URLs, and the bytes give
+    the digests.  This establishes what exists so the build can regenerate the indexes
+    around it.  It verifies nothing - `changed_canonical_paths` does that against git,
+    the one record the tree cannot rewrite.
+    """
+    records: list[dict[str, str]] = []
+    if not site.is_dir():
+        return records
+    root = base_url.rstrip("/")
+    for project_dir in sorted(entry for entry in site.iterdir() if entry.is_dir()):
+        project = project_dir.name
+        require_safe_segment(project, "published project")
+        for line_dir in sorted(entry for entry in project_dir.glob("v*") if entry.is_dir()):
+            compat = line_dir.name[1:]
+            require_compat_line(compat)
+            for release_dir in sorted(entry for entry in line_dir.iterdir() if entry.is_dir()):
+                version = release_dir.name
+                require_safe_segment(version, "published version")
+                stable_version_key(version)
+                records.extend(read_release(release_dir, root, project, compat, version))
+    return records
+
+
+def read_release(
+    release_dir: Path, root: str, project: str, compat: str, version: str
+) -> list[dict[str, str]]:
+    """Records for one release directory. Digests are computed to publish, not to police."""
+    on_disk = sorted(
+        entry.name
+        for entry in release_dir.iterdir()
+        if entry.is_file() and entry.name != "index.json"
+    )
+    index_path = release_dir / "index.json"
+    listed: dict[str, dict[str, str]] = {}
+    if index_path.is_file():
+        for entry in read_json_object(index_path).get("schemas", []):
+            if isinstance(entry, dict) and isinstance(entry.get("schema"), str):
+                listed[entry["schema"]] = entry
+    records: list[dict[str, str]] = []
+    for name in on_disk:
+        require_schema_basename(name)
+        body = (release_dir / name).read_bytes()
+        digest = hashlib.sha256(body).hexdigest()
+        entry = listed.get(name, {})
+        record = {
+            "project": project,
+            "version": version,
+            "schema": name,
+            "compat": compat,
+            "dialect": entry.get("dialect") or declared_dialect(release_dir / name, body),
+            "url": entry.get("url") or f"{root}/{project}/v{compat}/{version}/{name}",
+            "sha256": digest,
+        }
+        records.append(record)
+    return records
+
+
+def declared_dialect(path: Path, body: bytes) -> str:
+    """Fall back to the schema's own $schema when no release index records it."""
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise ValidationError(f"{path}: published schema is not valid JSON") from error
+    dialect = value.get("$schema") if isinstance(value, dict) else None
+    if not isinstance(dialect, str):
+        raise ValidationError(f"{path}: published schema declares no $schema")
+    return dialect
 
 
 def build_site(
@@ -409,21 +535,13 @@ def build_site(
 ) -> dict[str, int]:
     documents = fetch_document_set(base_url, artifacts, on_download)
     site.mkdir(parents=True, exist_ok=True)
-    catalog_by_key: dict[tuple[str, str, str], dict[str, str]] = {}
-    old_catalog = site / "index.json"
-    if old_catalog.exists():
-        try:
-            existing = json.loads(old_catalog.read_text())
-            for record in existing.get("schemas", []):
-                key = (record["project"], record["version"], record["schema"])
-                # The audit reads these, so reject a truncated record before we rely on it.
-                for field in ("compat", "sha256"):
-                    if field not in record:
-                        raise KeyError(field)
-                catalog_by_key[key] = record
-        except (json.JSONDecodeError, KeyError, TypeError) as error:
-            raise ValidationError("existing catalog is invalid") from error
-    published_before = list(catalog_by_key.values())
+    # What is already published, read from the tree itself.  Nothing reads the catalog
+    # back: it is derived output, so trusting it would only be trusting a copy.
+    published_before = read_published(site, base_url)
+    catalog_by_key: dict[tuple[str, str, str], dict[str, str]] = {
+        (record["project"], record["version"], record["schema"]): record
+        for record in published_before
+    }
     aliases: dict[tuple[str, str, str], SchemaDocument] = {}
     latest: dict[tuple[str, str], SchemaDocument] = {}
     released_documents: list[SchemaDocument] = []
@@ -448,7 +566,6 @@ def build_site(
             "dialect": document.dialect,
             "url": canonical_url(base_url, document),
             "sha256": hashlib.sha256(document.body).hexdigest(),
-            "published_at": document.artifact.published_at,
         }
         if "-" not in document.artifact.version:
             released_documents.append(document)
@@ -462,15 +579,29 @@ def build_site(
             latest[latest_key] = document
 
     # Everything ever published, not just what this build's lockfile happens to name.
-    # A line is only advertised once a stable release gives it a working alias.
-    versions_by_project: dict[str, set[str]] = {}
+    versions_by_line: dict[tuple[str, str], set[str]] = {}
     lines_by_project: dict[str, set[str]] = {}
+    stable_lines_by_project: dict[str, set[str]] = {}
+    releases: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     for record in catalog_by_key.values():
-        versions_by_project.setdefault(record["project"], set()).add(record["version"])
-        if "-" not in record["version"]:
-            lines_by_project.setdefault(record["project"], set()).add(record["compat"])
-    projects = set(versions_by_project)
-    require_alias_coverage(aliases, lines_by_project)
+        project, compat, version = record["project"], record["compat"], record["version"]
+        versions_by_line.setdefault((project, compat), set()).add(version)
+        lines_by_project.setdefault(project, set()).add(compat)
+        releases.setdefault((project, compat, version), []).append(record)
+        if "-" not in version:
+            stable_lines_by_project.setdefault(project, set()).add(compat)
+    projects = set(lines_by_project)
+    # Only a line with a stable release owes an alias; a prerelease-only line has none.
+    require_alias_coverage(aliases, stable_lines_by_project)
+
+    # Every release the catalog knows about, not just the ones this build published, so
+    # no line index can advertise a version whose directory has no index.  atomic_write
+    # makes each one immutable, and restores one that went missing out of band.
+    for (project, compat, version), records in sorted(releases.items()):
+        atomic_write(
+            site / project / f"v{compat}" / version / "index.json",
+            json_bytes(release_index(project, compat, version, records)),
+        )
 
     purge_mutable_paths(site, projects)
     line_members: dict[tuple[str, str], list[SchemaDocument]] = {}
@@ -479,11 +610,13 @@ def build_site(
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(document.body)
         line_members.setdefault((project, compat), []).append(document)
-    for (project, compat), members in line_members.items():
+    for (project, compat), versions in sorted(versions_by_line.items()):
+        members = sorted(line_members.get((project, compat), []), key=lambda member: member.basename)
         write_json(site / project / f"v{compat}" / "index.json", {
             "project": project,
             "compat": compat,
-            "schemas": [alias_record(base_url, member) for member in sorted(members, key=lambda m: m.basename)],
+            "versions": sorted(versions, key=stable_version_key),
+            "schemas": [alias_record(base_url, member) for member in members],
         })
 
     latest_members: dict[str, list[SchemaDocument]] = {}
@@ -498,19 +631,30 @@ def build_site(
             "schemas": [alias_record(base_url, member) for member in sorted(members, key=lambda m: m.basename)],
         })
 
+    root = base_url.rstrip("/")
     for project in sorted(projects):
-        write_json(site / project / "index.json", {
+        index: dict[str, Any] = {
             "project": project,
-            "versions": sorted(versions_by_project[project], key=stable_version_key),
-            # A project with only prereleases has versions but no line to advertise yet.
-            "compat_lines": sorted(lines_by_project.get(project, set()), key=compat_line_key),
-        })
+            "compat_lines": sorted(lines_by_project[project], key=compat_line_key),
+        }
+        if project in latest_members:
+            index["latest"] = f"{root}/{project}/latest/"
+        write_json(site / project / "index.json", index)
 
+    # One flat entry per published schema, so mirroring or auditing the site is a
+    # single fetch. Kept out of the hierarchy so every index lists one level only.
     catalog = sorted(
         catalog_by_key.values(),
         key=lambda record: (record["project"], stable_version_key(record["version"]), record["schema"]),
     )
-    write_json(site / "index.json", {"schema_catalog": 1, "schemas": catalog})
+    # Derived output for consumers: one fetch instead of a crawl.  Regenerated whole
+    # from the tree every run, so it can never be a stale or poisoned input.
+    write_json(site / "catalog.json", {"schema_catalog": 1, "schemas": catalog})
+    write_json(site / "index.json", {
+        "schema_site": 1,
+        "catalog": f"{root}/catalog.json",
+        "projects": sorted(projects),
+    })
     hostname = urllib.parse.urlparse(base_url).hostname
     if hostname is None:
         raise ValidationError("site base URL has no hostname")
@@ -524,7 +668,6 @@ def build_site(
         # A published CNAME switches Pages to the custom domain and takes the default
         # *.github.io URL down with it, so opting out has to remove the file.
         cname.unlink()
-    audit_published_catalog(site, published_before)
     return {"published": published, "aliases": len(aliases) + len(latest)}
 
 
@@ -544,7 +687,6 @@ def read_lock(path: Path) -> list[LockedArtifact]:
             (artifact.project, "project"),
             (artifact.version, "version"),
             (artifact.tag, "tag"),
-            (artifact.asset, "asset"),
         ):
             require_safe_segment(value, label)
         stable_version_key(artifact.version)
@@ -556,11 +698,20 @@ def read_lock(path: Path) -> list[LockedArtifact]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["build"])
+    parser.add_argument("command", choices=["build", "verify"])
     parser.add_argument("--manifest", type=Path, default=Path("manifest.toml"))
     parser.add_argument("--lock", type=Path, default=Path("manifest.lock"))
     parser.add_argument("--site", type=Path, default=Path("site"))
     args = parser.parse_args()
+    if args.command == "verify":
+        violations = changed_canonical_paths(sys.stdin.read())
+        if violations:
+            print("refusing to publish: canonical resources would change", file=sys.stderr)
+            for violation in violations:
+                print(f"  {violation}", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps({"violations": 0}))
+        return
     manifest = tomllib.loads(args.manifest.read_text())
     site_config = manifest.get("site", {})
     base_url = site_config.get("base_url")

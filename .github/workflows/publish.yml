@@ -45,12 +45,19 @@ jobs:
           fi
           python src/czschemas.py build --site site
 
-      - name: Publish changed aliases, indexes, and new releases
+      - name: Refuse to change a published resource
         run: |
           # --exclude=.git is load-bearing: ../published is a worktree whose .git is a
           # file, and --delete would otherwise remove it and detach the checkout.
           rsync -a --delete --exclude=.git site/ ../published/
           git -C ../published add -A
+          # git holds the only record of the published tree that the published tree
+          # cannot edit, so immutability is enforced here rather than inside the build.
+          git -C ../published diff --cached --name-status \
+            | python src/czschemas.py verify
+
+      - name: Publish changed aliases, indexes, and new releases
+        run: |
           if git -C ../published diff --cached --quiet; then
             echo "No publication changes."
             exit 0
