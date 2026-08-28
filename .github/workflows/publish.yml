@@ -12,11 +12,11 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -30,7 +30,7 @@ jobs:
         run: |
           if git ls-remote --exit-code --heads origin gh-pages; then
             git fetch origin gh-pages
-            git worktree add ../published FETCH_HEAD
+            git -C "$PWD" worktree add ../published origin/gh-pages --detach
           else
             git worktree add --detach ../published
             git -C ../published switch --orphan gh-pages
@@ -56,4 +56,4 @@ jobs:
           git -C ../published config user.name "github-actions[bot]"
           git -C ../published config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C ../published commit -m "Publish locked schemas"
-          git -C ../published push origin gh-pages
+          git -C ../published push origin HEAD:refs/heads/gh-pages

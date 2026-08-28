@@ -13,22 +13,31 @@ import dataclasses
 import hashlib
 import json
 import re
+import shutil
 import tarfile
 import tempfile
 import tomllib
+import urllib.error
 import urllib.parse
 import urllib.request
 
 import jsonschema
 from jsonschema.validators import validator_for
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 
 SCHEMA_INDEX_VERSION = 1
 MAX_ARCHIVE_MEMBERS = 1_000
 MAX_UNPACKED_BYTES = 64 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+DOWNLOAD_TIMEOUT_SECONDS = 30
 SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+GITHUB_DOWNLOAD_HOSTS = {
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+}
 
 
 class ValidationError(ValueError):
@@ -76,9 +85,56 @@ def safe_archive_path(name: str) -> PurePosixPath:
     return path
 
 
-def download(url: str) -> bytes:
-    with urllib.request.urlopen(url) as response:  # nosec B310 - URLs are lockfile data
-        return response.read()
+def validate_download_url(url: str) -> None:
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname or ""
+    if scheme != "https" or host not in GITHUB_DOWNLOAD_HOSTS:
+        raise ValidationError(f"unsafe artifact URL: {url!r}")
+
+
+class _RedirectGuard(urllib.request.HTTPRedirectHandler):
+    """Reject redirects to hosts (or schemes) outside the download allow-list."""
+
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        validate_download_url(urllib.parse.urljoin(request.full_url, new_url))
+        return super().redirect_request(request, file_pointer, code, message, headers, new_url)
+
+
+_OPENER = urllib.request.build_opener(_RedirectGuard)
+
+
+def download_origin(url: str, timeout: float) -> bytes:
+    """Perform the network transfer, bounded by MAX_ARTIFACT_BYTES."""
+    request = urllib.request.Request(url, method="GET")
+    with _OPENER.open(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise ValidationError(f"artifact download failed: HTTP {response.status}")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = response.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_ARTIFACT_BYTES:
+                raise ValidationError("artifact exceeds download size limit")
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
+def download(artifact: LockedArtifact) -> bytes:
+    """Download a locked artifact with strict allow-list, size, and timeout limits."""
+    validate_download_url(artifact.url)
+    try:
+        body = download_origin(artifact.url, DOWNLOAD_TIMEOUT_SECONDS)
+    except urllib.error.HTTPError as error:
+        raise ValidationError(f"artifact download failed: HTTP {error.code}") from error
+    except urllib.error.URLError as error:
+        raise ValidationError(f"artifact download failed: {error.reason}") from error
+    if len(body) > MAX_ARTIFACT_BYTES:
+        raise ValidationError("artifact exceeds download size limit")
+    return body
 
 
 def read_artifact(archive_path: Path) -> dict[str, bytes]:
@@ -173,22 +229,41 @@ def validate_document(base_url: str, document: SchemaDocument) -> None:
         raise ValidationError(f"{document.path}: $id must equal {expected_id}")
 
 
-def fetch_document_set(base_url: str, artifacts: list[LockedArtifact]) -> list[SchemaDocument]:
+def validate_artifact(
+    base_url: str,
+    artifact: LockedArtifact,
+    payload: bytes,
+) -> list[SchemaDocument]:
+    """Validate a downloaded artifact payload and return its schema documents."""
+    if len(payload) > MAX_ARTIFACT_BYTES:
+        raise ValidationError("artifact exceeds download size limit")
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != artifact.sha256:
+        raise ValidationError(f"sha256 mismatch for {artifact.project} {artifact.tag}")
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz") as temporary:
+        temporary.write(payload)
+        temporary.flush()
+        parsed = parse_index(read_artifact(Path(temporary.name)), artifact)
+    for document in parsed:
+        validate_document(base_url, document)
+    return parsed
+
+
+def fetch_document_set(
+    base_url: str,
+    artifacts: list[LockedArtifact],
+    on_download: Callable[[LockedArtifact], bytes] | None = None,
+) -> list[SchemaDocument]:
+    """Fetch and validate every locked artifact. `on_download` is test injection."""
     documents: list[SchemaDocument] = []
     for artifact in artifacts:
         for value, label in ((artifact.project, "project"), (artifact.version, "version")):
             require_safe_segment(value, label)
-        payload = download(artifact.url)
-        actual = hashlib.sha256(payload).hexdigest()
-        if actual != artifact.sha256:
-            raise ValidationError(f"sha256 mismatch for {artifact.project} {artifact.tag}")
-        with tempfile.NamedTemporaryFile(suffix=".tar.gz") as temporary:
-            temporary.write(payload)
-            temporary.flush()
-            parsed = parse_index(read_artifact(Path(temporary.name)), artifact)
-        for document in parsed:
-            validate_document(base_url, document)
-        documents.extend(parsed)
+        if on_download is not None:
+            payload = on_download(artifact)
+        else:
+            payload = download(artifact)
+        documents.extend(validate_artifact(base_url, artifact, payload))
     return documents
 
 
@@ -197,6 +272,19 @@ def atomic_write(path: Path, body: bytes) -> None:
     if path.exists() and path.read_bytes() != body:
         raise ImmutabilityError(f"would change existing canonical resource: {path}")
     path.write_bytes(body)
+
+
+def purge_mutable_paths(site: Path, projects: set[str]) -> None:
+    """Remove alias directories and project indexes so regeneration cannot leave stale state."""
+    for project in projects:
+        project_root = site / project
+        for kind in ("compat", "latest"):
+            target = project_root / kind
+            if target.exists():
+                shutil.rmtree(target)
+        index = project_root / "index.json"
+        if index.exists():
+            index.unlink()
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -213,8 +301,18 @@ def stable_version_key(version: str) -> tuple[int, int, int, str]:
     return int(major), int(minor), int(patch), prerelease or "~"
 
 
-def build_site(base_url: str, artifacts: list[LockedArtifact], site: Path) -> dict[str, int]:
-    documents = fetch_document_set(base_url, artifacts)
+def catalog_by_project(catalog_by_key: dict[tuple[str, str, str], dict[str, str]]) -> set[str]:
+    """Project names found in the existing published catalog."""
+    return {record["project"] for record in catalog_by_key.values()}
+
+
+def build_site(
+    base_url: str,
+    artifacts: list[LockedArtifact],
+    site: Path,
+    on_download: Callable[[LockedArtifact], bytes] | None = None,
+) -> dict[str, int]:
+    documents = fetch_document_set(base_url, artifacts, on_download)
     site.mkdir(parents=True, exist_ok=True)
     catalog_by_key: dict[tuple[str, str, str], dict[str, str]] = {}
     old_catalog = site / "index.json"
@@ -228,6 +326,8 @@ def build_site(base_url: str, artifacts: list[LockedArtifact], site: Path) -> di
             raise ValidationError("existing catalog is invalid") from error
     aliases: dict[tuple[str, str, str], SchemaDocument] = {}
     latest: dict[tuple[str, str], SchemaDocument] = {}
+    by_project: dict[str, list[SchemaDocument]] = {}
+    released_documents: list[SchemaDocument] = []
     published = 0
 
     for document in documents:
@@ -246,13 +346,19 @@ def build_site(base_url: str, artifacts: list[LockedArtifact], site: Path) -> di
             "published_at": document.artifact.published_at,
         }
         if "-" not in document.artifact.version:
-            compat_key = (document.artifact.project, document.compat, document.basename)
-            latest_key = (document.artifact.project, document.basename)
-            if compat_key not in aliases or stable_version_key(document.artifact.version) > stable_version_key(aliases[compat_key].artifact.version):
-                aliases[compat_key] = document
-            if latest_key not in latest or stable_version_key(document.artifact.version) > stable_version_key(latest[latest_key].artifact.version):
-                latest[latest_key] = document
+            released_documents.append(document)
 
+    for document in released_documents:
+        by_project.setdefault(document.artifact.project, []).append(document)
+        compat_key = (document.artifact.project, document.compat, document.basename)
+        latest_key = (document.artifact.project, document.basename)
+        if compat_key not in aliases or stable_version_key(document.artifact.version) > stable_version_key(aliases[compat_key].artifact.version):
+            aliases[compat_key] = document
+        if latest_key not in latest or stable_version_key(document.artifact.version) > stable_version_key(latest[latest_key].artifact.version):
+            latest[latest_key] = document
+
+    projects = set(by_project) | set(catalog_by_project(catalog_by_key))
+    purge_mutable_paths(site, projects)
     for (project, compat, basename), document in aliases.items():
         destination = site / project / "compat" / compat / basename
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -279,6 +385,13 @@ def build_site(base_url: str, artifacts: list[LockedArtifact], site: Path) -> di
             "published_at": document.artifact.published_at,
         })
 
+    for project in sorted(projects):
+        versions = sorted(
+            {document.artifact.version for document in by_project[project]},
+            key=stable_version_key,
+        )
+        write_json(site / project / "index.json", {"project": project, "versions": versions})
+
     catalog = sorted(
         catalog_by_key.values(),
         key=lambda record: (record["project"], stable_version_key(record["version"]), record["schema"]),
@@ -292,6 +405,7 @@ def build_site(base_url: str, artifacts: list[LockedArtifact], site: Path) -> di
 
 
 def read_lock(path: Path) -> list[LockedArtifact]:
+    """Parse and validate a lockfile. Fields are validated before any download."""
     raw = tomllib.loads(path.read_text())
     entries = raw.get("artifact", [])
     if not isinstance(entries, list):
@@ -301,7 +415,18 @@ def read_lock(path: Path) -> list[LockedArtifact]:
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != required:
             raise ValidationError("each lock entry must contain exactly the supported fields")
-        artifacts.append(LockedArtifact(**entry))
+        artifact = LockedArtifact(**entry)
+        for value, label in (
+            (artifact.project, "project"),
+            (artifact.version, "version"),
+            (artifact.tag, "tag"),
+            (artifact.asset, "asset"),
+        ):
+            require_safe_segment(value, label)
+        stable_version_key(artifact.version)
+        if not re.fullmatch(r"[0-9a-f]{64}", artifact.sha256):
+            raise ValidationError(f"sha256 must be 64 hex characters for {artifact.project} {artifact.tag}")
+        artifacts.append(artifact)
     return artifacts
 
 
