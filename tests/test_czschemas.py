@@ -17,6 +17,7 @@ spec.loader.exec_module(czschemas)
 
 
 BASE_URL = "https://schemas.columnzero.com"
+DIALECT = "https://json-schema.org/draft/2020-12/schema"
 
 
 def compat_of(version: str) -> str:
@@ -105,6 +106,29 @@ def locked_github_artifact(directory: Path, version: str, payload_bytes: bytes) 
     )
 
 
+def locked_multi(directory: Path, version: str, names: list[str]) -> czschemas.LockedArtifact:
+    """A locked artifact carrying several schemas in one release."""
+    index = {
+        "schema_index": 1,
+        "project": "planr",
+        "release": version,
+        "schemas": [{"path": name, "compat": compat_of(version), "dialect": DIALECT} for name in names],
+    }
+    payload = artifact_with_index(index, *[(name, schema(version, name)) for name in names])
+    path = directory / f"multi-{version}.tar.gz"
+    path.write_bytes(payload)
+    return czschemas.LockedArtifact(
+        project="planr",
+        repo="unprofessor/planr-rs",
+        tag=f"v{version}",
+        version=version,
+        asset="schemas.tar.gz",
+        url=path.as_uri(),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        published_at="2026-08-01T00:00:00Z",
+    )
+
+
 def file_download(artifact: czschemas.LockedArtifact) -> bytes:
     """Return the payload written next to a locked file:// artifact (test fixture)."""
     return Path(artifact.url.removeprefix("file://")).read_bytes()
@@ -148,6 +172,7 @@ class BuildSiteTests(unittest.TestCase):
             [{
                 "schema": "planr.schema.json",
                 "version": "1.4.2",
+                "dialect": DIALECT,
                 "url": f"{BASE_URL}/planr/v1/1.4.2/planr.schema.json",
                 "sha256": hashlib.sha256(canonical.read_bytes()).hexdigest(),
                 "published_at": "2026-08-01T00:00:00Z",
@@ -208,54 +233,52 @@ class BuildSiteTests(unittest.TestCase):
         self.assertTrue((site / "planr/v1/1.4.2/planr.schema.json").exists())
 
     def test_build_drops_stale_aliases_when_lockfile_changes(self):
-        old_index = {
-            "schema_index": 1,
-            "project": "planr",
-            "release": "1.4.2",
-            "schemas": [
-                {
-                    "path": "planr.schema.json",
-                    "compat": "1",
-                    "dialect": "https://json-schema.org/draft/2020-12/schema",
-                },
-                {
-                    "path": "task.schema.json",
-                    "compat": "1",
-                    "dialect": "https://json-schema.org/draft/2020-12/schema",
-                },
-            ],
-        }
         site = self.root / "site"
-        legacy = locked_artifact(self.root, "1.4.2")
-        czschemas.build_site(BASE_URL, [legacy], site, on_download=file_download)
-
-        old_archive_path = self.root / "old.tar.gz"
-        old_archive_data = artifact_with_index(
-            old_index,
-            ("planr.schema.json", schema("1.4.2", "planr.schema.json")),
-            ("task.schema.json", schema("1.4.2", "task.schema.json")),
-        )
-        old_archive_path.write_bytes(old_archive_data)
-        old_artifact = czschemas.LockedArtifact(
-            project="planr",
-            repo="unprofessor/planr-rs",
-            tag="v1.4.2",
-            version="1.4.2",
-            asset="schemas.tar.gz",
-            url=old_archive_path.as_uri(),
-            sha256=hashlib.sha256(old_archive_data).hexdigest(),
-            published_at="2026-08-01T00:00:00Z",
-        )
-        czschemas.build_site(BASE_URL, [old_artifact], site, on_download=file_download)
+        multi = locked_multi(self.root, "1.4.0", ["planr.schema.json", "task.schema.json"])
+        czschemas.build_site(BASE_URL, [multi], site, on_download=file_download)
         self.assertTrue((site / "planr/v1/task.schema.json").exists())
 
+        # 1.5.0 drops task.schema.json, and 1.4.0 leaves the lockfile with it.
         newer = locked_artifact(self.root, "1.5.0")
-        czschemas.build_site(BASE_URL, [legacy, newer], site, on_download=file_download)
+        czschemas.build_site(BASE_URL, [newer], site, on_download=file_download)
         self.assertFalse((site / "planr/v1/task.schema.json").exists())
         self.assertFalse((site / "planr/latest/task.schema.json").exists())
         self.assertTrue((site / "planr/v1/planr.schema.json").exists())
-        # Purging the compat line must not disturb the releases nested inside it.
-        self.assertTrue((site / "planr/v1/1.4.2/task.schema.json").exists())
+        # Purging the compat line must not disturb the releases nested inside it,
+        # and the audit requires 1.4.0 to survive being dropped from the lockfile.
+        self.assertTrue((site / "planr/v1/1.4.0/task.schema.json").exists())
+
+    def test_release_index_describes_the_release(self):
+        site = self.root / "site"
+        multi = locked_multi(self.root, "1.4.0", ["planr.schema.json", "task.schema.json"])
+        czschemas.build_site(BASE_URL, [multi], site, on_download=file_download)
+        index = json.loads((site / "planr/v1/1.4.0/index.json").read_text())
+        self.assertEqual(index["project"], "planr")
+        self.assertEqual(index["version"], "1.4.0")
+        self.assertEqual(index["compat"], "1")
+        self.assertEqual(
+            [entry["schema"] for entry in index["schemas"]],
+            ["planr.schema.json", "task.schema.json"],
+        )
+        self.assertEqual(
+            index["schemas"][0],
+            {
+                "schema": "planr.schema.json",
+                "dialect": DIALECT,
+                "url": f"{BASE_URL}/planr/v1/1.4.0/planr.schema.json",
+                "sha256": hashlib.sha256(
+                    (site / "planr/v1/1.4.0/planr.schema.json").read_bytes()
+                ).hexdigest(),
+            },
+        )
+
+    def test_release_membership_cannot_change_after_publication(self):
+        """The per-file check cannot see an added schema; the release index can."""
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        grown = locked_multi(self.root, "1.4.2", ["planr.schema.json", "task.schema.json"])
+        with self.assertRaises(czschemas.ImmutabilityError):
+            czschemas.build_site(BASE_URL, [grown], site, on_download=file_download)
 
     def test_build_nests_releases_under_their_compat_line(self):
         site = self.root / "site"

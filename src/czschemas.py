@@ -326,9 +326,32 @@ def purge_mutable_paths(site: Path, projects: set[str]) -> None:
                     entry.unlink()
 
 
+def json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    path.write_bytes(json_bytes(value))
+
+
+def release_index(base_url: str, compat: str, version: str, members: list[SchemaDocument]) -> dict[str, Any]:
+    """Describe one release. Its membership is fixed, so this index is immutable too."""
+    project = members[0].artifact.project
+    return {
+        "project": project,
+        "version": version,
+        "compat": compat,
+        "schemas": [
+            {
+                "schema": member.basename,
+                "dialect": member.dialect,
+                "url": canonical_url(base_url, member),
+                "sha256": hashlib.sha256(member.body).hexdigest(),
+            }
+            for member in sorted(members, key=lambda member: member.basename)
+        ],
+    }
 
 
 def stable_version_key(version: str) -> tuple[int, int, int, str]:
@@ -356,6 +379,7 @@ def alias_record(base_url: str, document: SchemaDocument) -> dict[str, str]:
     return {
         "schema": document.basename,
         "version": document.artifact.version,
+        "dialect": document.dialect,
         "url": canonical_url(base_url, document),
         "sha256": hashlib.sha256(document.body).hexdigest(),
         "published_at": document.artifact.published_at,
@@ -427,6 +451,7 @@ def build_site(
     aliases: dict[tuple[str, str, str], SchemaDocument] = {}
     latest: dict[tuple[str, str], SchemaDocument] = {}
     released_documents: list[SchemaDocument] = []
+    release_members: dict[tuple[str, str, str], list[SchemaDocument]] = {}
     published = 0
 
     for document in documents:
@@ -450,8 +475,19 @@ def build_site(
             "sha256": hashlib.sha256(document.body).hexdigest(),
             "published_at": document.artifact.published_at,
         }
+        release_members.setdefault(
+            (document.artifact.project, document.compat, document.artifact.version), []
+        ).append(document)
         if "-" not in document.artifact.version:
             released_documents.append(document)
+
+    # Written through atomic_write, so a release index is as immutable as the schemas
+    # it describes, and purge_mutable_paths never recurses far enough to remove it.
+    for (project, compat, version), members in release_members.items():
+        atomic_write(
+            site / project / f"v{compat}" / version / "index.json",
+            json_bytes(release_index(base_url, compat, version, members)),
+        )
 
     for document in released_documents:
         compat_key = (document.artifact.project, document.compat, document.basename)

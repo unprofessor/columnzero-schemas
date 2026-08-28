@@ -26,6 +26,30 @@ contents. It validates the schema index, archive safety, artifact SHA-256, JSON
 Schema meta-schema, and canonical `$id`; it refuses to modify or drop an
 existing canonical resource.
 
+## Indexes
+
+Every directory carries an `index.json`, which Pages serves at the directory
+URL. Each one describes its own level rather than restating the tree beneath it:
+
+| Path | Answers | Mutable |
+| --- | --- | --- |
+| `/index.json` | every schema ever published, across all projects | yes |
+| `/{project}/index.json` | which compat lines and versions exist | yes |
+| `/{project}/v{compat}/index.json` | what this line currently serves | yes |
+| `/{project}/v{compat}/{version}/index.json` | which schemas this release contains | **no** |
+| `/{project}/latest/index.json` | what `latest/` currently serves | yes |
+
+The release index goes through the same immutability check as the schemas beside
+it, so a published release's membership is fixed. That catches what the per-file
+check cannot: adding a schema to an already-published release leaves every
+existing file untouched, so only the release index notices.
+
+The root index is the deliberate exception. It is the full cross-product because
+it serves two jobs a per-level index cannot — it is the mirror and audit surface,
+and it is the document the build re-reads to confirm nothing published went
+missing. It therefore grows without bound; prefer a narrower index when you do
+not need all of it.
+
 ## Status
 
 `columnzero-schemas` publishes its own contract schema as the first and only
