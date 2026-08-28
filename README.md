@@ -28,25 +28,44 @@ existing canonical resource.
 
 ## Indexes
 
-Every directory carries an `index.json`, which Pages serves at the directory
-URL. Each one describes its own level rather than restating the tree beneath it:
+Every directory carries an `index.json` listing exactly one level down, which
+Pages serves at the directory URL. Nothing restates the tree beneath it:
 
-| Path | Answers | Mutable |
-| --- | --- | --- |
-| `/index.json` | every schema ever published, across all projects | yes |
-| `/{project}/index.json` | which compat lines and versions exist | yes |
-| `/{project}/v{compat}/index.json` | what this line currently serves | yes |
-| `/{project}/v{compat}/{version}/index.json` | which schemas this release contains | **no** |
-| `/{project}/latest/index.json` | what `latest/` currently serves | yes |
+| Path | Lists |
+| --- | --- |
+| `/index.json` | projects |
+| `/{project}/index.json` | compat lines, and `latest/` when one exists |
+| `/{project}/v{compat}/index.json` | versions, and the aliases sitting beside them |
+| `/{project}/v{compat}/{version}/index.json` | the schemas in that release |
+| `/{project}/latest/index.json` | the schemas `latest/` currently serves |
 
-The release index goes through the same immutability check as the schemas beside
-it, so a published release's membership is fixed. That catches what the per-file
-check cannot: adding a schema to an already-published release leaves every
-existing file untouched, so only the release index notices.
+Walking from the root reaches everything published, one fetch per level.
 
-The root index is the deliberate exception: it is the full cross-product, so
-that mirroring or auditing the whole site is one fetch rather than a crawl. It
-grows without bound, so prefer a narrower index when you do not need all of it.
+The release index is the only immutable one. It goes through the same check as
+the schemas beside it, so a published release's membership is fixed. That
+catches what the per-file check cannot: adding a schema to an already-published
+release leaves every existing file untouched, so only an index of the membership
+notices.
+
+A compat line appears as soon as it has any release. A line holding only
+prereleases resolves and lists its versions, but serves no alias, so its
+`schemas` is empty.
+
+## Catalog
+
+The flat cross-product lives at `/catalog.json`, deliberately outside the
+hierarchy:
+
+```text
+https://schemas.columnzero.com/catalog.json
+```
+
+It is one fetch to mirror or audit the whole site rather than a crawl, and it is
+the record the build compares against to detect damage that predates it. It is
+not an index, which is why it is not called one — keeping it separate is what
+lets every `index.json` list a single level. It grows without bound, since
+canonical resources are never removed, so prefer an index when you do not need
+all of it.
 
 ## Status
 
@@ -153,8 +172,8 @@ Three checks protect published bytes, and they fail on different things.
    before the build starts and re-checked afterwards. This is the primary
    guard: it needs no record to be correct, and it covers release indexes as
    well as schemas. It can only see damage *this build* caused.
-3. **Record against bytes.** Every entry in the previous catalog is re-read and
-   re-hashed. This is what the snapshot cannot do: catch damage that predates
+3. **Record against bytes.** Every entry in the previous `/catalog.json` is
+   re-read and re-hashed. This is what the snapshot cannot do: catch damage that predates
    the build — an out-of-band deletion, a bad merge, a partial push — which
    would otherwise be adopted as the new baseline while the catalog kept
    advertising a URL that 404s.

@@ -168,8 +168,10 @@ class BuildSiteTests(unittest.TestCase):
         self.assertEqual(canonical.read_bytes(), compat.read_bytes())
         self.assertEqual(canonical.read_bytes(), latest.read_bytes())
         self.assertEqual(result, {"published": 1, "aliases": 2})
+        line_index = json.loads((site / "planr/v1/index.json").read_text())
+        self.assertEqual(line_index["versions"], ["1.4.2"])
         self.assertEqual(
-            json.loads((site / "planr/v1/index.json").read_text())["schemas"],
+            line_index["schemas"],
             [{
                 "schema": "planr.schema.json",
                 "version": "1.4.2",
@@ -181,12 +183,24 @@ class BuildSiteTests(unittest.TestCase):
         )
         self.assertEqual(
             json.loads((site / "planr/index.json").read_text()),
-            {"project": "planr", "versions": ["1.4.2"], "compat_lines": ["1"]},
+            {
+                "project": "planr",
+                "compat_lines": ["1"],
+                "latest": f"{BASE_URL}/planr/latest/",
+            },
+        )
+        self.assertEqual(
+            json.loads((site / "index.json").read_text()),
+            {
+                "schema_site": 1,
+                "catalog": f"{BASE_URL}/catalog.json",
+                "projects": ["planr"],
+            },
         )
         self.assertFalse((site / "CNAME").exists())
         self.assertTrue((site / ".nojekyll").exists())
         self.assertEqual(
-            json.loads((site / "index.json").read_text())["schemas"][0]["url"],
+            json.loads((site / "catalog.json").read_text())["schemas"][0]["url"],
             f"{BASE_URL}/planr/v1/1.4.2/planr.schema.json",
         )
 
@@ -229,7 +243,7 @@ class BuildSiteTests(unittest.TestCase):
         site = self.root / "site"
         czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
         czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download)
-        versions = [entry["version"] for entry in json.loads((site / "index.json").read_text())["schemas"]]
+        versions = [entry["version"] for entry in json.loads((site / "catalog.json").read_text())["schemas"]]
         self.assertEqual(versions, ["1.4.2", "1.5.0"])
         self.assertTrue((site / "planr/v1/1.4.2/planr.schema.json").exists())
 
@@ -384,7 +398,7 @@ class BuildSiteTests(unittest.TestCase):
         self.assertTrue((site / "planr/v1/planr.schema.json").exists())
         self.assertTrue((site / "planr/v2/planr.schema.json").exists())
 
-    def test_prereleases_publish_without_creating_a_compat_line(self):
+    def test_prereleases_publish_without_moving_an_alias(self):
         site = self.root / "site"
         result = czschemas.build_site(
             BASE_URL,
@@ -396,9 +410,14 @@ class BuildSiteTests(unittest.TestCase):
         self.assertTrue((site / "planr/v1/1.0.0-rc1/planr.schema.json").exists())
         self.assertFalse((site / "planr/v1/planr.schema.json").exists())
         self.assertFalse((site / "planr/latest").exists())
+        # The line exists and resolves, but serves no alias and no `latest` link.
         self.assertEqual(
             json.loads((site / "planr/index.json").read_text()),
-            {"project": "planr", "versions": ["1.0.0-rc1"], "compat_lines": []},
+            {"project": "planr", "compat_lines": ["1"]},
+        )
+        self.assertEqual(
+            json.loads((site / "planr/v1/index.json").read_text()),
+            {"project": "planr", "compat": "1", "versions": ["1.0.0-rc1"], "schemas": []},
         )
 
     def test_custom_domain_is_opt_in_and_reversible(self):
@@ -445,7 +464,7 @@ class BuildSiteTests(unittest.TestCase):
     def test_snapshot_audit_covers_release_indexes_the_catalog_does_not(self):
         site = self.root / "site"
         czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
-        catalog = json.loads((site / "index.json").read_text())["schemas"]
+        catalog = json.loads((site / "catalog.json").read_text())["schemas"]
         self.assertNotIn("index.json", [record["schema"] for record in catalog])
         original = czschemas.purge_mutable_paths
 
@@ -462,6 +481,32 @@ class BuildSiteTests(unittest.TestCase):
                 )
         finally:
             czschemas.purge_mutable_paths = original
+
+    def test_every_level_of_the_hierarchy_resolves(self):
+        site = self.root / "site"
+        czschemas.build_site(
+            BASE_URL,
+            [locked_artifact(self.root, "1.4.2"), locked_artifact(self.root, "2.0.0")],
+            site,
+            on_download=file_download,
+        )
+        root = json.loads((site / "index.json").read_text())
+        self.assertEqual(root["projects"], ["planr"])
+        for project in root["projects"]:
+            project_index = json.loads((site / project / "index.json").read_text())
+            self.assertEqual(project_index["compat_lines"], ["1", "2"])
+            for compat in project_index["compat_lines"]:
+                line = json.loads((site / project / f"v{compat}" / "index.json").read_text())
+                for version in line["versions"]:
+                    release = json.loads(
+                        (site / project / f"v{compat}" / version / "index.json").read_text()
+                    )
+                    for entry in release["schemas"]:
+                        published = site / project / f"v{compat}" / version / entry["schema"]
+                        self.assertTrue(published.is_file())
+                        self.assertEqual(
+                            hashlib.sha256(published.read_bytes()).hexdigest(), entry["sha256"]
+                        )
 
     def test_extract_rejects_path_traversal(self):
         payload = BytesIO()

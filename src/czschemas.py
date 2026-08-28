@@ -472,10 +472,18 @@ def build_site(
     site.mkdir(parents=True, exist_ok=True)
     releases_before = snapshot_releases(site)
     catalog_by_key: dict[tuple[str, str, str], dict[str, str]] = {}
-    old_catalog = site / "index.json"
-    if old_catalog.exists():
+    # The catalog used to live at /index.json, which is now a hierarchical index.  Fall
+    # back to it once so an existing site migrates without forgetting what it published.
+    for candidate in (site / "catalog.json", site / "index.json"):
+        if not candidate.exists():
+            continue
         try:
-            existing = json.loads(old_catalog.read_text())
+            existing = json.loads(candidate.read_text())
+        except json.JSONDecodeError as error:
+            raise ValidationError("existing catalog is invalid") from error
+        if not isinstance(existing, dict) or "schema_catalog" not in existing:
+            continue
+        try:
             for record in existing.get("schemas", []):
                 key = (record["project"], record["version"], record["schema"])
                 # The audit reads these, so reject a truncated record before we rely on it.
@@ -483,8 +491,9 @@ def build_site(
                     if field not in record:
                         raise KeyError(field)
                 catalog_by_key[key] = record
-        except (json.JSONDecodeError, KeyError, TypeError) as error:
+        except (KeyError, TypeError) as error:
             raise ValidationError("existing catalog is invalid") from error
+        break
     published_before = list(catalog_by_key.values())
     aliases: dict[tuple[str, str, str], SchemaDocument] = {}
     latest: dict[tuple[str, str], SchemaDocument] = {}
@@ -536,15 +545,18 @@ def build_site(
             latest[latest_key] = document
 
     # Everything ever published, not just what this build's lockfile happens to name.
-    # A line is only advertised once a stable release gives it a working alias.
-    versions_by_project: dict[str, set[str]] = {}
+    versions_by_line: dict[tuple[str, str], set[str]] = {}
     lines_by_project: dict[str, set[str]] = {}
+    stable_lines_by_project: dict[str, set[str]] = {}
     for record in catalog_by_key.values():
-        versions_by_project.setdefault(record["project"], set()).add(record["version"])
+        project, compat = record["project"], record["compat"]
+        versions_by_line.setdefault((project, compat), set()).add(record["version"])
+        lines_by_project.setdefault(project, set()).add(compat)
         if "-" not in record["version"]:
-            lines_by_project.setdefault(record["project"], set()).add(record["compat"])
-    projects = set(versions_by_project)
-    require_alias_coverage(aliases, lines_by_project)
+            stable_lines_by_project.setdefault(project, set()).add(compat)
+    projects = set(lines_by_project)
+    # Only a line with a stable release owes an alias; a prerelease-only line has none.
+    require_alias_coverage(aliases, stable_lines_by_project)
 
     purge_mutable_paths(site, projects)
     line_members: dict[tuple[str, str], list[SchemaDocument]] = {}
@@ -553,11 +565,13 @@ def build_site(
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(document.body)
         line_members.setdefault((project, compat), []).append(document)
-    for (project, compat), members in line_members.items():
+    for (project, compat), versions in sorted(versions_by_line.items()):
+        members = sorted(line_members.get((project, compat), []), key=lambda member: member.basename)
         write_json(site / project / f"v{compat}" / "index.json", {
             "project": project,
             "compat": compat,
-            "schemas": [alias_record(base_url, member) for member in sorted(members, key=lambda m: m.basename)],
+            "versions": sorted(versions, key=stable_version_key),
+            "schemas": [alias_record(base_url, member) for member in members],
         })
 
     latest_members: dict[str, list[SchemaDocument]] = {}
@@ -572,19 +586,28 @@ def build_site(
             "schemas": [alias_record(base_url, member) for member in sorted(members, key=lambda m: m.basename)],
         })
 
+    root = base_url.rstrip("/")
     for project in sorted(projects):
-        write_json(site / project / "index.json", {
+        index: dict[str, Any] = {
             "project": project,
-            "versions": sorted(versions_by_project[project], key=stable_version_key),
-            # A project with only prereleases has versions but no line to advertise yet.
-            "compat_lines": sorted(lines_by_project.get(project, set()), key=compat_line_key),
-        })
+            "compat_lines": sorted(lines_by_project[project], key=compat_line_key),
+        }
+        if project in latest_members:
+            index["latest"] = f"{root}/{project}/latest/"
+        write_json(site / project / "index.json", index)
 
+    # The flat cross-product is a catalog, not an index: one fetch to mirror or audit
+    # the whole site, kept out of the hierarchy so every index lists one level only.
     catalog = sorted(
         catalog_by_key.values(),
         key=lambda record: (record["project"], stable_version_key(record["version"]), record["schema"]),
     )
-    write_json(site / "index.json", {"schema_catalog": 1, "schemas": catalog})
+    write_json(site / "catalog.json", {"schema_catalog": 1, "schemas": catalog})
+    write_json(site / "index.json", {
+        "schema_site": 1,
+        "catalog": f"{root}/catalog.json",
+        "projects": sorted(projects),
+    })
     hostname = urllib.parse.urlparse(base_url).hostname
     if hostname is None:
         raise ValidationError("site base URL has no hostname")
