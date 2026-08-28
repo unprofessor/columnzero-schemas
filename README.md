@@ -53,19 +53,22 @@ prereleases resolves and lists its versions, but serves no alias, so its
 
 ## Catalog
 
-The flat cross-product lives at `/catalog.json`, deliberately outside the
-hierarchy:
+`/catalog.json` lists every published schema in one flat file, deliberately
+outside the hierarchy:
 
 ```text
 https://schemas.columnzero.com/catalog.json
 ```
 
-It is one fetch to mirror or audit the whole site rather than a crawl, and it is
-the record the build compares against to detect damage that predates it. It is
-not an index, which is why it is not called one — keeping it separate is what
-lets every `index.json` list a single level. It grows without bound, since
-canonical resources are never removed, so prefer an index when you do not need
-all of it.
+One entry per schema per release, each with its URL and digest. Fetching it once
+gives you the whole site, where the indexes would take a walk down every level —
+so it is what to use for mirroring or auditing. It is also the record the build
+compares against to detect damage that predates it.
+
+It is not an index, which is why it is not called one; keeping it separate is
+what lets every `index.json` list a single level. It gains an entry with every
+release and never loses one, since canonical resources are never removed, so
+prefer an index when you do not need all of it.
 
 ## Status
 

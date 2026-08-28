@@ -596,8 +596,8 @@ def build_site(
             index["latest"] = f"{root}/{project}/latest/"
         write_json(site / project / "index.json", index)
 
-    # The flat cross-product is a catalog, not an index: one fetch to mirror or audit
-    # the whole site, kept out of the hierarchy so every index lists one level only.
+    # One flat entry per published schema, so mirroring or auditing the site is a
+    # single fetch. Kept out of the hierarchy so every index lists one level only.
     catalog = sorted(
         catalog_by_key.values(),
         key=lambda record: (record["project"], stable_version_key(record["version"]), record["schema"]),
