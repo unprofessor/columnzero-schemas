@@ -6,11 +6,8 @@
       "dialect": "https://json-schema.org/draft/2020-12/schema",
       "schema": "schema-index.schema.json",
       "sha256": "72ba85348b37ffb44bfe52d0de3ec63fac9bf6417b8f2ec5990e34b7c760e9ea",
-      "url": "https://schemas.columnzero.com/columnzero-schemas/v1/1.0.0/schema-index.schema.json",
-      "version": "1.0.0"
+      "url": "https://schemas.columnzero.com/columnzero-schemas/v1/1.0.0/schema-index.schema.json"
     }
   ],
-  "versions": [
-    "1.0.0"
-  ]
+  "version": "1.0.0"
 }

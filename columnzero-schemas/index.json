@@ -2,8 +2,6 @@
   "compat_lines": [
     "1"
   ],
-  "project": "columnzero-schemas",
-  "versions": [
-    "1.0.0"
-  ]
+  "latest": "https://schemas.columnzero.com/columnzero-schemas/latest/",
+  "project": "columnzero-schemas"
 }
