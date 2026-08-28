@@ -335,21 +335,25 @@ def write_json(path: Path, value: Any) -> None:
     path.write_bytes(json_bytes(value))
 
 
-def release_index(base_url: str, compat: str, version: str, members: list[SchemaDocument]) -> dict[str, Any]:
-    """Describe one release. Its membership is fixed, so this index is immutable too."""
-    project = members[0].artifact.project
+def release_index(project: str, compat: str, version: str, records: list[dict[str, str]]) -> dict[str, Any]:
+    """Describe one release from its catalog records.
+
+    Built from the catalog rather than from the current lockfile, so every release that
+    has ever been published has an index - not just the ones this build happens to name.
+    Its membership is fixed, so the index is immutable too.
+    """
     return {
         "project": project,
         "version": version,
         "compat": compat,
         "schemas": [
             {
-                "schema": member.basename,
-                "dialect": member.dialect,
-                "url": canonical_url(base_url, member),
-                "sha256": hashlib.sha256(member.body).hexdigest(),
+                "schema": record["schema"],
+                "dialect": record["dialect"],
+                "url": record["url"],
+                "sha256": record["sha256"],
             }
-            for member in sorted(members, key=lambda member: member.basename)
+            for record in sorted(records, key=lambda record: record["schema"])
         ],
     }
 
@@ -370,6 +374,7 @@ def compat_line_for(version: str) -> str:
 
 
 def compat_line_key(line: str) -> tuple[int, int]:
+    require_compat_line(line)
     major, _, minor = line.partition(".")
     return int(major), int(minor or 0)
 
@@ -406,6 +411,81 @@ def require_alias_coverage(
             raise ValidationError(
                 f"lockfile does not cover published compat line(s) for {project}: "
                 + ", ".join(f"v{line}" for line in missing)
+            )
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise ValidationError(f"{path.name} is not valid JSON") from error
+    if not isinstance(value, dict):
+        raise ValidationError(f"{path.name} must contain a JSON object")
+    return value
+
+
+def looks_like_catalog(path: Path) -> bool:
+    """Whether a legacy /index.json is the old catalog rather than the new root index."""
+    try:
+        value = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return False
+    return isinstance(value, dict) and "schema_catalog" in value
+
+
+def require_catalog_record(record: Any) -> None:
+    """Validate a record read back from the published catalog.
+
+    Records are re-read from a tree we published, but they go on to build paths that are
+    written to and deleted from, so they get the same checks as artifact data rather
+    than being trusted for having been ours once.
+    """
+    if not isinstance(record, dict):
+        raise ValidationError("catalog entries must be objects")
+    for field in ("project", "version", "schema", "compat", "dialect", "url", "sha256"):
+        if not isinstance(record.get(field), str):
+            raise ValidationError(f"catalog entry is missing a string {field}")
+    require_safe_segment(record["project"], "catalog project")
+    require_safe_segment(record["version"], "catalog version")
+    stable_version_key(record["version"])
+    require_compat_line(record["compat"])
+    require_schema_basename(record["schema"])
+    if not re.fullmatch(r"[0-9a-f]{64}", record["sha256"]):
+        raise ValidationError(f"catalog entry has a malformed sha256: {record['sha256']!r}")
+
+
+def require_release_membership(
+    published_before: list[dict[str, str]], documents: list[SchemaDocument]
+) -> None:
+    """A published release's schema set is fixed.
+
+    `atomic_write` cannot see this on its own: adding a schema to a release creates a
+    file with nothing to compare against, and the release index only guards a release
+    that already has one.  The catalog is the record of what a release contained, so it
+    is what closes the gap for releases published before release indexes existed.
+    """
+    prior: dict[tuple[str, str], set[str]] = {}
+    for record in published_before:
+        prior.setdefault((record["project"], record["version"]), set()).add(record["schema"])
+    current: dict[tuple[str, str], set[str]] = {}
+    for document in documents:
+        key = (document.artifact.project, document.artifact.version)
+        current.setdefault(key, set()).add(document.basename)
+    for (project, version), schemas in sorted(current.items()):
+        was = prior.get((project, version))
+        if was is not None and was != schemas:
+            added = sorted(schemas - was)
+            removed = sorted(was - schemas)
+            detail = "; ".join(
+                part
+                for part in (
+                    f"added {', '.join(added)}" if added else "",
+                    f"removed {', '.join(removed)}" if removed else "",
+                )
+                if part
+            )
+            raise ImmutabilityError(
+                f"published release {project} {version} changed membership: {detail}"
             )
 
 
@@ -472,33 +552,30 @@ def build_site(
     site.mkdir(parents=True, exist_ok=True)
     releases_before = snapshot_releases(site)
     catalog_by_key: dict[tuple[str, str, str], dict[str, str]] = {}
-    # The catalog used to live at /index.json, which is now a hierarchical index.  Fall
-    # back to it once so an existing site migrates without forgetting what it published.
-    for candidate in (site / "catalog.json", site / "index.json"):
-        if not candidate.exists():
-            continue
-        try:
-            existing = json.loads(candidate.read_text())
-        except json.JSONDecodeError as error:
-            raise ValidationError("existing catalog is invalid") from error
-        if not isinstance(existing, dict) or "schema_catalog" not in existing:
-            continue
-        try:
-            for record in existing.get("schemas", []):
-                key = (record["project"], record["version"], record["schema"])
-                # The audit reads these, so reject a truncated record before we rely on it.
-                for field in ("compat", "sha256"):
-                    if field not in record:
-                        raise KeyError(field)
-                catalog_by_key[key] = record
-        except (KeyError, TypeError) as error:
-            raise ValidationError("existing catalog is invalid") from error
-        break
+    source = site / "catalog.json"
+    if not source.exists():
+        # The catalog used to live at /index.json, which is now the root index. Migrate
+        # from it once, but only when that file really is a catalog.
+        legacy = site / "index.json"
+        source = legacy if legacy.exists() and looks_like_catalog(legacy) else None
+    if source is not None:
+        existing = read_json_object(source)
+        if "schema_catalog" not in existing:
+            # Only reachable for catalog.json. Falling through here instead would make a
+            # damaged record indistinguishable from a fresh site, and the build would
+            # quietly delete every alias and index for lines it had forgotten.
+            raise ValidationError(f"{source.name} exists but is not a schema catalog")
+        schemas = existing.get("schemas", [])
+        if not isinstance(schemas, list):
+            raise ValidationError(f"{source.name} schemas must be an array")
+        for record in schemas:
+            require_catalog_record(record)
+            catalog_by_key[(record["project"], record["version"], record["schema"])] = record
     published_before = list(catalog_by_key.values())
+    require_release_membership(published_before, documents)
     aliases: dict[tuple[str, str, str], SchemaDocument] = {}
     latest: dict[tuple[str, str], SchemaDocument] = {}
     released_documents: list[SchemaDocument] = []
-    release_members: dict[tuple[str, str, str], list[SchemaDocument]] = {}
     published = 0
 
     for document in documents:
@@ -522,19 +599,8 @@ def build_site(
             "sha256": hashlib.sha256(document.body).hexdigest(),
             "published_at": document.artifact.published_at,
         }
-        release_members.setdefault(
-            (document.artifact.project, document.compat, document.artifact.version), []
-        ).append(document)
         if "-" not in document.artifact.version:
             released_documents.append(document)
-
-    # Written through atomic_write, so a release index is as immutable as the schemas
-    # it describes, and purge_mutable_paths never recurses far enough to remove it.
-    for (project, compat, version), members in release_members.items():
-        atomic_write(
-            site / project / f"v{compat}" / version / "index.json",
-            json_bytes(release_index(base_url, compat, version, members)),
-        )
 
     for document in released_documents:
         compat_key = (document.artifact.project, document.compat, document.basename)
@@ -548,15 +614,26 @@ def build_site(
     versions_by_line: dict[tuple[str, str], set[str]] = {}
     lines_by_project: dict[str, set[str]] = {}
     stable_lines_by_project: dict[str, set[str]] = {}
+    releases: dict[tuple[str, str, str], list[dict[str, str]]] = {}
     for record in catalog_by_key.values():
-        project, compat = record["project"], record["compat"]
-        versions_by_line.setdefault((project, compat), set()).add(record["version"])
+        project, compat, version = record["project"], record["compat"], record["version"]
+        versions_by_line.setdefault((project, compat), set()).add(version)
         lines_by_project.setdefault(project, set()).add(compat)
-        if "-" not in record["version"]:
+        releases.setdefault((project, compat, version), []).append(record)
+        if "-" not in version:
             stable_lines_by_project.setdefault(project, set()).add(compat)
     projects = set(lines_by_project)
     # Only a line with a stable release owes an alias; a prerelease-only line has none.
     require_alias_coverage(aliases, stable_lines_by_project)
+
+    # Every release the catalog knows about, not just the ones this build published, so
+    # no line index can advertise a version whose directory has no index.  atomic_write
+    # makes each one immutable, and restores one that went missing out of band.
+    for (project, compat, version), records in sorted(releases.items()):
+        atomic_write(
+            site / project / f"v{compat}" / version / "index.json",
+            json_bytes(release_index(project, compat, version, records)),
+        )
 
     purge_mutable_paths(site, projects)
     line_members: dict[tuple[str, str], list[SchemaDocument]] = {}

@@ -508,6 +508,79 @@ class BuildSiteTests(unittest.TestCase):
                             hashlib.sha256(published.read_bytes()).hexdigest(), entry["sha256"]
                         )
 
+    def test_unreadable_catalog_is_fatal_rather_than_a_fresh_start(self):
+        """Falling through would make damage indistinguishable from an empty site."""
+        site = self.root / "site"
+        czschemas.build_site(
+            BASE_URL,
+            [locked_artifact(self.root, "1.4.2"), locked_artifact(self.root, "2.0.0")],
+            site,
+            on_download=file_download,
+        )
+        (site / "catalog.json").write_text("{}")
+        with self.assertRaisesRegex(czschemas.ValidationError, "not a schema catalog"):
+            czschemas.build_site(
+                BASE_URL, [locked_artifact(self.root, "2.0.0")], site, on_download=file_download
+            )
+        # The v1 line and its alias must still be standing.
+        self.assertTrue((site / "planr/v1/planr.schema.json").exists())
+        self.assertTrue((site / "planr/v1/index.json").exists())
+
+    def test_catalog_migrates_from_the_legacy_index_location(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        legacy = json.loads((site / "catalog.json").read_text())
+        (site / "catalog.json").unlink()
+        (site / "index.json").write_text(json.dumps(legacy))
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download)
+        versions = [entry["version"] for entry in json.loads((site / "catalog.json").read_text())["schemas"]]
+        self.assertEqual(versions, ["1.4.2", "1.5.0"])
+        self.assertEqual(json.loads((site / "index.json").read_text())["schema_site"], 1)
+
+    def test_release_index_exists_for_releases_absent_from_the_lockfile(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        # A tree published before release indexes existed has none for 1.4.2.
+        (site / "planr/v1/1.4.2/index.json").unlink()
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download)
+        line = json.loads((site / "planr/v1/index.json").read_text())
+        for version in line["versions"]:
+            self.assertTrue((site / f"planr/v1/{version}/index.json").is_file(), version)
+
+    def test_release_membership_is_fixed_even_without_an_existing_index(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        (site / "planr/v1/1.4.2/index.json").unlink()
+        grown = locked_multi(self.root, "1.4.2", ["planr.schema.json", "task.schema.json"])
+        with self.assertRaisesRegex(czschemas.ImmutabilityError, "changed membership"):
+            czschemas.build_site(BASE_URL, [grown], site, on_download=file_download)
+
+    def test_release_index_tampering_is_rejected(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        (site / "planr/v1/1.4.2/index.json").write_text('{"schemas": []}\n')
+        with self.assertRaises(czschemas.ImmutabilityError):
+            czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download)
+
+    def test_catalog_records_are_revalidated_before_they_build_paths(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        original = json.loads((site / "catalog.json").read_text())
+        for field, value in (
+            ("project", ".."),
+            ("compat", "1/1.4.2"),
+            ("version", "../../etc"),
+            ("sha256", "zz"),
+            ("dialect", None),
+        ):
+            poisoned = json.loads(json.dumps(original))
+            poisoned["schemas"][0][field] = value
+            (site / "catalog.json").write_text(json.dumps(poisoned))
+            with self.assertRaises(czschemas.ValidationError):
+                czschemas.build_site(
+                    BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download
+                )
+
     def test_extract_rejects_path_traversal(self):
         payload = BytesIO()
         with tarfile.open(fileobj=payload, mode="w:gz") as archive:

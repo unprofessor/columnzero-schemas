@@ -41,11 +41,10 @@ Pages serves at the directory URL. Nothing restates the tree beneath it:
 
 Walking from the root reaches everything published, one fetch per level.
 
-The release index is the only immutable one. It goes through the same check as
-the schemas beside it, so a published release's membership is fixed. That
-catches what the per-file check cannot: adding a schema to an already-published
-release leaves every existing file untouched, so only an index of the membership
-notices.
+The release index is the only immutable one. It is rebuilt from the catalog on
+every run rather than from the current lockfile, so every release that has ever
+been published has one — including releases that have since left the lockfile,
+which the line index above them still lists.
 
 A compat line appears as soon as it has any release. A line holding only
 prereleases resolves and lists its versions, but serves no alias, so its
@@ -69,6 +68,12 @@ It is not an index, which is why it is not called one; keeping it separate is
 what lets every `index.json` list a single level. It gains an entry with every
 release and never loses one, since canonical resources are never removed, so
 prefer an index when you do not need all of it.
+
+`/index.json` used to hold this catalog and is now the root index. A tree
+published under the old layout migrates on its next build. Rolling the publisher
+back after that migration is **not** safe: an older build looks for the catalog
+at `/index.json`, finds none, and republishes a catalog containing only what the
+current lockfile names.
 
 ## Status
 
@@ -165,25 +170,36 @@ pushes the result back. Both copies exclude `.git`: the published tree is a
 worktree whose `.git` is a file, and a `--delete` sync without that exclusion
 detaches the checkout mid-run.
 
-Three checks protect published bytes, and they fail on different things.
+Four checks protect published bytes, and they fail on different things.
 
-1. **Per-file, while writing.** Writing a canonical resource compares against
-   what is already on disk and aborts on any difference. This only sees
-   resources the build is rewriting, and only catches modification — an
-   *added* file has nothing to compare against.
-2. **Tree against itself.** Every file inside a release directory is digested
-   before the build starts and re-checked afterwards. This is the primary
-   guard: it needs no record to be correct, and it covers release indexes as
-   well as schemas. It can only see damage *this build* caused.
-3. **Record against bytes.** Every entry in the previous `/catalog.json` is
-   re-read and re-hashed. This is what the snapshot cannot do: catch damage that predates
-   the build — an out-of-band deletion, a bad merge, a partial push — which
-   would otherwise be adopted as the new baseline while the catalog kept
-   advertising a URL that 404s.
+1. **Per-file, while writing.** Writing a canonical resource — a schema or a
+   release index — compares against what is already on disk and aborts on any
+   difference. Because release indexes are rebuilt from the catalog on every
+   run, this catches tampering with one at any later date, and restores one
+   that went missing.
+2. **Release membership.** A release's schema set is compared against what the
+   catalog records it contained. Check 1 cannot see this: adding a schema to a
+   published release creates a file with nothing to compare against.
+3. **Tree against itself.** Every file inside a release directory is digested
+   before the build starts and re-checked afterwards. It needs no record to be
+   correct, so it holds even where the catalog does not. It can only see damage
+   *this build* caused.
+4. **Record against bytes.** Every entry in the previous `/catalog.json` is
+   re-read and re-hashed, catching damage that predates the build — an
+   out-of-band deletion, a bad merge, a partial push — which would otherwise be
+   adopted as the new baseline while the catalog kept advertising a URL that
+   404s.
+
+The catalog is load-bearing for checks 1, 2 and 4, so a `catalog.json` that is
+present but unreadable aborts the build. Treating it as an empty history would
+make damage indistinguishable from a fresh site, and the next run would delete
+every alias and index belonging to a line it had forgotten. Records read back
+from it are revalidated before they are used to build a path, on the same
+grounds: the tree is ours, but being ours is not a safety property.
 
 Structurally, the purge that clears stale aliases walks a compat line file by
 file and never recurses, so no code path in the publisher can remove a release
-directory. Check 2 exists because that is an argument about the code as written,
+directory. Check 3 exists because that is an argument about the code as written,
 not a property the code enforces about itself.
 
 ## Lockfile completeness
