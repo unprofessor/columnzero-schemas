@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.columnzero.com/columnzero-schemas/v1/1.0.0/schema-index.schema.json",
+  "title": "Schema artifact index",
+  "description": "The root index.json carried by a schemas.tar.gz release artifact. Version 1, matching schema_index: 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_index", "project", "release", "schemas"],
+  "properties": {
+    "schema_index": {
+      "description": "Contract version. The publisher accepts only 1.",
+      "const": 1
+    },
+    "project": {
+      "description": "Project name. Must equal the locked artifact's project and forms the first URL segment.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "release": {
+      "description": "SemVer release. Must equal the locked artifact's version.",
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "schemas": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "compat", "dialect"],
+        "properties": {
+          "path": {
+            "description": "Path to the schema file within the archive. The basename becomes the published filename, so basenames must be unique across the index.",
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$"
+          },
+          "compat": {
+            "description": "Compatibility line this release belongs to: the SemVer major, or 0.MINOR before 1.0. Must agree with release.",
+            "type": "string",
+            "pattern": "^(?:[1-9]\\d*|0\\.(?:0|[1-9]\\d*))$"
+          },
+          "dialect": {
+            "description": "JSON Schema dialect. Must equal the $schema declared inside the file.",
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      }
+    }
+  }
+}

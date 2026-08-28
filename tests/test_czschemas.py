@@ -19,17 +19,23 @@ spec.loader.exec_module(czschemas)
 BASE_URL = "https://schemas.columnzero.com"
 
 
+def compat_of(version: str) -> str:
+    """The compat line for a version, computed independently of the publisher."""
+    major, minor = version.split("-")[0].split(".")[:2]
+    return major if major != "0" else f"0.{minor}"
+
+
 def schema(version: str, name: str = "planr.schema.json") -> bytes:
     return json.dumps(
         {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$id": f"{BASE_URL}/planr/rel/{version}/{name}",
+            "$id": f"{BASE_URL}/planr/v{compat_of(version)}/{version}/{name}",
             "type": "object",
         }
     ).encode()
 
 
-def artifact(version: str, compat: str = "1", body: bytes | None = None) -> bytes:
+def artifact(version: str, compat: str | None = None, body: bytes | None = None) -> bytes:
     index = {
         "schema_index": 1,
         "project": "planr",
@@ -37,7 +43,7 @@ def artifact(version: str, compat: str = "1", body: bytes | None = None) -> byte
         "schemas": [
             {
                 "path": "planr.schema.json",
-                "compat": compat,
+                "compat": compat or compat_of(version),
                 "dialect": "https://json-schema.org/draft/2020-12/schema",
             }
         ],
@@ -67,7 +73,7 @@ def artifact_with_index(index: dict, *name_bodies: tuple[str, bytes]) -> bytes:
     return output.getvalue()
 
 
-def locked_artifact(directory: Path, version: str, compat: str = "1", body: bytes | None = None):
+def locked_artifact(directory: Path, version: str, compat: str | None = None, body: bytes | None = None):
     payload = artifact(version, compat, body)
     path = directory / f"{version}.tar.gz"
     path.write_bytes(payload)
@@ -131,17 +137,30 @@ class BuildSiteTests(unittest.TestCase):
             on_download=file_download,
         )
 
-        canonical = site / "planr/rel/1.4.2/planr.schema.json"
-        compat = site / "planr/compat/1/planr.schema.json"
+        canonical = site / "planr/v1/1.4.2/planr.schema.json"
+        compat = site / "planr/v1/planr.schema.json"
         latest = site / "planr/latest/planr.schema.json"
         self.assertEqual(canonical.read_bytes(), compat.read_bytes())
         self.assertEqual(canonical.read_bytes(), latest.read_bytes())
         self.assertEqual(result, {"published": 1, "aliases": 2})
-        self.assertEqual(json.loads((site / "planr/compat/1/index.json").read_text())["version"], "1.4.2")
+        self.assertEqual(
+            json.loads((site / "planr/v1/index.json").read_text())["schemas"],
+            [{
+                "schema": "planr.schema.json",
+                "version": "1.4.2",
+                "url": f"{BASE_URL}/planr/v1/1.4.2/planr.schema.json",
+                "sha256": hashlib.sha256(canonical.read_bytes()).hexdigest(),
+                "published_at": "2026-08-01T00:00:00Z",
+            }],
+        )
+        self.assertEqual(
+            json.loads((site / "planr/index.json").read_text()),
+            {"project": "planr", "versions": ["1.4.2"], "compat_lines": ["1"]},
+        )
         self.assertEqual((site / "CNAME").read_text(), "schemas.columnzero.com\n")
         self.assertEqual(
             json.loads((site / "index.json").read_text())["schemas"][0]["url"],
-            f"{BASE_URL}/planr/rel/1.4.2/planr.schema.json",
+            f"{BASE_URL}/planr/v1/1.4.2/planr.schema.json",
         )
 
     def test_build_rejects_schema_with_wrong_canonical_id(self):
@@ -185,7 +204,7 @@ class BuildSiteTests(unittest.TestCase):
         czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download)
         versions = [entry["version"] for entry in json.loads((site / "index.json").read_text())["schemas"]]
         self.assertEqual(versions, ["1.4.2", "1.5.0"])
-        self.assertTrue((site / "planr/rel/1.4.2/planr.schema.json").exists())
+        self.assertTrue((site / "planr/v1/1.4.2/planr.schema.json").exists())
 
     def test_build_drops_stale_aliases_when_lockfile_changes(self):
         old_index = {
@@ -227,13 +246,135 @@ class BuildSiteTests(unittest.TestCase):
             published_at="2026-08-01T00:00:00Z",
         )
         czschemas.build_site(BASE_URL, [old_artifact], site, on_download=file_download)
-        self.assertTrue((site / "planr/compat/1/task.schema.json").exists())
+        self.assertTrue((site / "planr/v1/task.schema.json").exists())
 
         newer = locked_artifact(self.root, "1.5.0")
         czschemas.build_site(BASE_URL, [legacy, newer], site, on_download=file_download)
-        self.assertFalse((site / "planr/compat/1/task.schema.json").exists())
+        self.assertFalse((site / "planr/v1/task.schema.json").exists())
         self.assertFalse((site / "planr/latest/task.schema.json").exists())
-        self.assertTrue((site / "planr/compat/1/planr.schema.json").exists())
+        self.assertTrue((site / "planr/v1/planr.schema.json").exists())
+        # Purging the compat line must not disturb the releases nested inside it.
+        self.assertTrue((site / "planr/v1/1.4.2/task.schema.json").exists())
+
+    def test_build_nests_releases_under_their_compat_line(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        czschemas.build_site(
+            BASE_URL,
+            [locked_artifact(self.root, "1.4.2"), locked_artifact(self.root, "1.5.0")],
+            site,
+            on_download=file_download,
+        )
+        self.assertTrue((site / "planr/v1/1.4.2/planr.schema.json").exists())
+        self.assertEqual(
+            (site / "planr/v1/planr.schema.json").read_bytes(),
+            (site / "planr/v1/1.5.0/planr.schema.json").read_bytes(),
+        )
+
+    def test_pre_one_point_zero_releases_use_a_minor_compat_line(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "0.3.1")], site, on_download=file_download)
+        self.assertTrue((site / "planr/v0.3/0.3.1/planr.schema.json").exists())
+        self.assertTrue((site / "planr/v0.3/planr.schema.json").exists())
+        self.assertEqual(
+            json.loads((site / "planr/index.json").read_text())["compat_lines"], ["0.3"]
+        )
+
+    def test_build_rejects_compat_that_disagrees_with_the_release(self):
+        with self.assertRaisesRegex(czschemas.ValidationError, "does not describe release"):
+            czschemas.build_site(
+                BASE_URL,
+                [locked_artifact(self.root, "1.4.2", compat="2")],
+                self.root / "site",
+                on_download=file_download,
+            )
+
+    def test_build_rejects_a_schema_file_without_the_schema_json_suffix(self):
+        index = {
+            "schema_index": 1,
+            "project": "planr",
+            "release": "1.4.2",
+            "schemas": [{
+                "path": "planr.json",
+                "compat": "1",
+                "dialect": "https://json-schema.org/draft/2020-12/schema",
+            }],
+        }
+        payload = artifact_with_index(index, ("planr.json", schema("1.4.2", "planr.json")))
+        path = self.root / "suffixless.tar.gz"
+        path.write_bytes(payload)
+        locked = czschemas.LockedArtifact(
+            project="planr",
+            repo="unprofessor/planr-rs",
+            tag="v1.4.2",
+            version="1.4.2",
+            asset="schemas.tar.gz",
+            url=path.as_uri(),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            published_at="2026-08-01T00:00:00Z",
+        )
+        with self.assertRaisesRegex(czschemas.ValidationError, "schema.json"):
+            czschemas.build_site(BASE_URL, [locked], self.root / "site", on_download=file_download)
+
+    def test_build_aborts_when_a_published_release_has_gone_missing(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        (site / "planr/v1/1.4.2/planr.schema.json").unlink()
+        with self.assertRaisesRegex(czschemas.ImmutabilityError, "missing"):
+            czschemas.build_site(
+                BASE_URL,
+                [locked_artifact(self.root, "1.5.0")],
+                site,
+                on_download=file_download,
+            )
+
+    def test_build_aborts_when_a_published_release_was_edited_out_of_band(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        (site / "planr/v1/1.4.2/planr.schema.json").write_bytes(b"{}")
+        with self.assertRaisesRegex(czschemas.ImmutabilityError, "changed"):
+            czschemas.build_site(
+                BASE_URL,
+                [locked_artifact(self.root, "1.5.0")],
+                site,
+                on_download=file_download,
+            )
+
+    def test_build_refuses_to_orphan_a_published_compat_line(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        with self.assertRaisesRegex(czschemas.ValidationError, r"does not cover .*: v1"):
+            czschemas.build_site(
+                BASE_URL,
+                [locked_artifact(self.root, "2.0.0")],
+                site,
+                on_download=file_download,
+            )
+        czschemas.build_site(
+            BASE_URL,
+            [locked_artifact(self.root, "1.4.2"), locked_artifact(self.root, "2.0.0")],
+            site,
+            on_download=file_download,
+        )
+        self.assertTrue((site / "planr/v1/planr.schema.json").exists())
+        self.assertTrue((site / "planr/v2/planr.schema.json").exists())
+
+    def test_prereleases_publish_without_creating_a_compat_line(self):
+        site = self.root / "site"
+        result = czschemas.build_site(
+            BASE_URL,
+            [locked_artifact(self.root, "1.0.0-rc1")],
+            site,
+            on_download=file_download,
+        )
+        self.assertEqual(result, {"published": 1, "aliases": 0})
+        self.assertTrue((site / "planr/v1/1.0.0-rc1/planr.schema.json").exists())
+        self.assertFalse((site / "planr/v1/planr.schema.json").exists())
+        self.assertFalse((site / "planr/latest").exists())
+        self.assertEqual(
+            json.loads((site / "planr/index.json").read_text()),
+            {"project": "planr", "versions": ["1.0.0-rc1"], "compat_lines": []},
+        )
 
     def test_extract_rejects_path_traversal(self):
         payload = BytesIO()

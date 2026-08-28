@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Build immutable JSON Schema resources for schemas.columnzero.com.
 
-The publisher deliberately trusts only locked release artifacts.  Existing canonical
-`rel/` paths are never overwritten; mutable `compat/`, `latest/`, and index paths are
-regenerated on every build.
+Canonical release resources live at `/{project}/v{compat}/{version}/{name}.schema.json`
+and are never overwritten or removed.  The mutable resources around them -- the
+compat-line alias at `/{project}/v{compat}/`, `latest/`, and every index -- are
+regenerated on every build.  The publisher trusts only locked release artifacts.
 """
 
 from __future__ import annotations
@@ -33,6 +34,11 @@ MAX_UNPACKED_BYTES = 64 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 DOWNLOAD_TIMEOUT_SECONDS = 30
 SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# A compat line is a SemVer major, or `0.MINOR` where the minor is the breaking boundary.
+COMPAT_LINE = re.compile(r"^(?:[1-9]\d*|0\.(?:0|[1-9]\d*))$")
+# Canonical schema files and release directories share a parent, so their names must not
+# be able to collide.  No SemVer version can end in this suffix, and no index.json can.
+SCHEMA_SUFFIX = ".schema.json"
 GITHUB_DOWNLOAD_HOSTS = {
     "github.com",
     "objects.githubusercontent.com",
@@ -76,6 +82,17 @@ class SchemaDocument:
 def require_safe_segment(value: str, label: str) -> None:
     if not value or not SAFE_SEGMENT.fullmatch(value) or value in {".", ".."}:
         raise ValidationError(f"unsafe {label}: {value!r}")
+
+
+def require_compat_line(value: str) -> None:
+    if not COMPAT_LINE.fullmatch(value or ""):
+        raise ValidationError(f"compat must be a major or 0.minor line: {value!r}")
+
+
+def require_schema_basename(value: str) -> None:
+    require_safe_segment(value, "schema basename")
+    if not value.endswith(SCHEMA_SUFFIX) or len(value) == len(SCHEMA_SUFFIX):
+        raise ValidationError(f"schema file must be named <name>{SCHEMA_SUFFIX}: {value!r}")
 
 
 def safe_archive_path(name: str) -> PurePosixPath:
@@ -191,9 +208,16 @@ def parse_index(files: dict[str, bytes], artifact: LockedArtifact) -> list[Schem
         if not all(isinstance(value, str) for value in (path, compat, dialect)):
             raise ValidationError("schema index entries require string path, compat, and dialect")
         safe_archive_path(path)
-        require_safe_segment(compat, "compat")
+        require_compat_line(compat)
+        expected_compat = compat_line_for(artifact.version)
+        if compat != expected_compat:
+            raise ValidationError(
+                f"{path}: compat {compat!r} does not describe release {artifact.version}"
+                f" (expected {expected_compat!r})"
+            )
         basename = PurePosixPath(path).name
-        if path == "index.json" or path not in files or path in seen or basename in seen_basenames:
+        require_schema_basename(basename)
+        if path not in files or path in seen or basename in seen_basenames:
             raise ValidationError(f"invalid or duplicate schema path: {path!r}")
         seen.add(path)
         seen_basenames.add(basename)
@@ -204,8 +228,12 @@ def parse_index(files: dict[str, bytes], artifact: LockedArtifact) -> list[Schem
 def canonical_url(base_url: str, document: SchemaDocument) -> str:
     require_safe_segment(document.artifact.project, "project")
     require_safe_segment(document.artifact.version, "version")
-    require_safe_segment(document.basename, "schema basename")
-    return f"{base_url.rstrip('/')}/{document.artifact.project}/rel/{document.artifact.version}/{document.basename}"
+    require_compat_line(document.compat)
+    require_schema_basename(document.basename)
+    return (
+        f"{base_url.rstrip('/')}/{document.artifact.project}"
+        f"/v{document.compat}/{document.artifact.version}/{document.basename}"
+    )
 
 
 def validate_document(base_url: str, document: SchemaDocument) -> None:
@@ -275,16 +303,27 @@ def atomic_write(path: Path, body: bytes) -> None:
 
 
 def purge_mutable_paths(site: Path, projects: set[str]) -> None:
-    """Remove alias directories and project indexes so regeneration cannot leave stale state."""
+    """Remove regenerated resources so a rebuild cannot leave stale aliases behind.
+
+    Mutable resources are the files directly inside a project or compat-line directory;
+    canonical releases live one level deeper, under `v{compat}/{version}/`.  This walks
+    compat lines file by file and never recurses, so no code path can delete a release.
+    `latest/` holds nothing else, so it is removed whole.
+    """
     for project in projects:
         project_root = site / project
-        for kind in ("compat", "latest"):
-            target = project_root / kind
-            if target.exists():
-                shutil.rmtree(target)
+        latest = project_root / "latest"
+        if latest.is_dir():
+            shutil.rmtree(latest)
         index = project_root / "index.json"
         if index.exists():
             index.unlink()
+        for line in sorted(project_root.glob("v*")):
+            if not line.is_dir():
+                continue
+            for entry in sorted(line.iterdir()):
+                if entry.is_file():
+                    entry.unlink()
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -301,9 +340,64 @@ def stable_version_key(version: str) -> tuple[int, int, int, str]:
     return int(major), int(minor), int(patch), prerelease or "~"
 
 
-def catalog_by_project(catalog_by_key: dict[tuple[str, str, str], dict[str, str]]) -> set[str]:
-    """Project names found in the existing published catalog."""
-    return {record["project"] for record in catalog_by_key.values()}
+def compat_line_for(version: str) -> str:
+    """The compat line a release belongs to: its major, or `0.minor` before 1.0."""
+    major, minor, _patch, _prerelease = stable_version_key(version)
+    return str(major) if major > 0 else f"0.{minor}"
+
+
+def compat_line_key(line: str) -> tuple[int, int]:
+    major, _, minor = line.partition(".")
+    return int(major), int(minor or 0)
+
+
+def alias_record(base_url: str, document: SchemaDocument) -> dict[str, str]:
+    """Describe the release a mutable alias currently points at."""
+    return {
+        "schema": document.basename,
+        "version": document.artifact.version,
+        "url": canonical_url(base_url, document),
+        "sha256": hashlib.sha256(document.body).hexdigest(),
+        "published_at": document.artifact.published_at,
+    }
+
+
+def require_alias_coverage(
+    aliases: dict[tuple[str, str, str], SchemaDocument],
+    lines_by_project: dict[str, set[str]],
+) -> None:
+    """Refuse to leave a published compat line without its mutable alias.
+
+    Aliases are rebuilt from the lockfile alone, so an artifact dropped from the lock
+    would silently take its line's alias down while the releases underneath stayed
+    published.  The lockfile is cumulative by design; this makes that a build failure
+    rather than a 404 on a URL the project index still advertises.
+    """
+    covered: dict[str, set[str]] = {}
+    for project, compat, _basename in aliases:
+        covered.setdefault(project, set()).add(compat)
+    for project, lines in sorted(lines_by_project.items()):
+        missing = sorted(lines - covered.get(project, set()), key=compat_line_key)
+        if missing:
+            raise ValidationError(
+                f"lockfile does not cover published compat line(s) for {project}: "
+                + ", ".join(f"v{line}" for line in missing)
+            )
+
+
+def audit_published_catalog(site: Path, records: list[dict[str, str]]) -> None:
+    """Verify every previously published canonical resource survived the rebuild.
+
+    The catalog records the URL and digest of each release, so this closes the loop that
+    `atomic_write` cannot: that check only catches a resource that *changed*, while this
+    also catches one that was deleted or truncated by a bug elsewhere in the build.
+    """
+    for record in records:
+        path = site / record["project"] / f"v{record['compat']}" / record["version"] / record["schema"]
+        if not path.is_file():
+            raise ImmutabilityError(f"previously published resource is missing: {path}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]:
+            raise ImmutabilityError(f"previously published resource changed: {path}")
 
 
 def build_site(
@@ -321,17 +415,27 @@ def build_site(
             existing = json.loads(old_catalog.read_text())
             for record in existing.get("schemas", []):
                 key = (record["project"], record["version"], record["schema"])
+                # The audit reads these, so reject a truncated record before we rely on it.
+                for field in ("compat", "sha256"):
+                    if field not in record:
+                        raise KeyError(field)
                 catalog_by_key[key] = record
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise ValidationError("existing catalog is invalid") from error
+    published_before = list(catalog_by_key.values())
     aliases: dict[tuple[str, str, str], SchemaDocument] = {}
     latest: dict[tuple[str, str], SchemaDocument] = {}
-    by_project: dict[str, list[SchemaDocument]] = {}
     released_documents: list[SchemaDocument] = []
     published = 0
 
     for document in documents:
-        target = site / document.artifact.project / "rel" / document.artifact.version / document.basename
+        target = (
+            site
+            / document.artifact.project
+            / f"v{document.compat}"
+            / document.artifact.version
+            / document.basename
+        )
         existed = target.exists()
         atomic_write(target, document.body)
         published += not existed
@@ -349,7 +453,6 @@ def build_site(
             released_documents.append(document)
 
     for document in released_documents:
-        by_project.setdefault(document.artifact.project, []).append(document)
         compat_key = (document.artifact.project, document.compat, document.basename)
         latest_key = (document.artifact.project, document.basename)
         if compat_key not in aliases or stable_version_key(document.artifact.version) > stable_version_key(aliases[compat_key].artifact.version):
@@ -357,40 +460,50 @@ def build_site(
         if latest_key not in latest or stable_version_key(document.artifact.version) > stable_version_key(latest[latest_key].artifact.version):
             latest[latest_key] = document
 
-    projects = set(by_project) | set(catalog_by_project(catalog_by_key))
+    # Everything ever published, not just what this build's lockfile happens to name.
+    # A line is only advertised once a stable release gives it a working alias.
+    versions_by_project: dict[str, set[str]] = {}
+    lines_by_project: dict[str, set[str]] = {}
+    for record in catalog_by_key.values():
+        versions_by_project.setdefault(record["project"], set()).add(record["version"])
+        if "-" not in record["version"]:
+            lines_by_project.setdefault(record["project"], set()).add(record["compat"])
+    projects = set(versions_by_project)
+    require_alias_coverage(aliases, lines_by_project)
+
     purge_mutable_paths(site, projects)
+    line_members: dict[tuple[str, str], list[SchemaDocument]] = {}
     for (project, compat, basename), document in aliases.items():
-        destination = site / project / "compat" / compat / basename
+        destination = site / project / f"v{compat}" / basename
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(document.body)
-        write_json(destination.parent / "index.json", {
+        line_members.setdefault((project, compat), []).append(document)
+    for (project, compat), members in line_members.items():
+        write_json(site / project / f"v{compat}" / "index.json", {
             "project": project,
             "compat": compat,
-            "schema": basename,
-            "version": document.artifact.version,
-            "url": canonical_url(base_url, document),
-            "sha256": hashlib.sha256(document.body).hexdigest(),
-            "published_at": document.artifact.published_at,
+            "schemas": [alias_record(base_url, member) for member in sorted(members, key=lambda m: m.basename)],
         })
+
+    latest_members: dict[str, list[SchemaDocument]] = {}
     for (project, basename), document in latest.items():
         destination = site / project / "latest" / basename
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(document.body)
-        write_json(destination.parent / "index.json", {
+        latest_members.setdefault(project, []).append(document)
+    for project, members in latest_members.items():
+        write_json(site / project / "latest" / "index.json", {
             "project": project,
-            "schema": basename,
-            "version": document.artifact.version,
-            "url": canonical_url(base_url, document),
-            "sha256": hashlib.sha256(document.body).hexdigest(),
-            "published_at": document.artifact.published_at,
+            "schemas": [alias_record(base_url, member) for member in sorted(members, key=lambda m: m.basename)],
         })
 
     for project in sorted(projects):
-        versions = sorted(
-            {document.artifact.version for document in by_project[project]},
-            key=stable_version_key,
-        )
-        write_json(site / project / "index.json", {"project": project, "versions": versions})
+        write_json(site / project / "index.json", {
+            "project": project,
+            "versions": sorted(versions_by_project[project], key=stable_version_key),
+            # A project with only prereleases has versions but no line to advertise yet.
+            "compat_lines": sorted(lines_by_project.get(project, set()), key=compat_line_key),
+        })
 
     catalog = sorted(
         catalog_by_key.values(),
@@ -401,6 +514,7 @@ def build_site(
     if hostname is None:
         raise ValidationError("site base URL has no hostname")
     (site / "CNAME").write_text(f"{hostname}\n")
+    audit_published_catalog(site, published_before)
     return {"published": published, "aliases": len(aliases) + len(latest)}
 
 
