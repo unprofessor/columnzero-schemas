@@ -405,6 +405,7 @@ def build_site(
     artifacts: list[LockedArtifact],
     site: Path,
     on_download: Callable[[LockedArtifact], bytes] | None = None,
+    custom_domain: bool = False,
 ) -> dict[str, int]:
     documents = fetch_document_set(base_url, artifacts, on_download)
     site.mkdir(parents=True, exist_ok=True)
@@ -513,7 +514,16 @@ def build_site(
     hostname = urllib.parse.urlparse(base_url).hostname
     if hostname is None:
         raise ValidationError("site base URL has no hostname")
-    (site / "CNAME").write_text(f"{hostname}\n")
+    # Pages runs Jekyll unless told otherwise, which does nothing useful for a JSON
+    # tree and silently drops any path segment that starts with an underscore.
+    (site / ".nojekyll").write_text("")
+    cname = site / "CNAME"
+    if custom_domain:
+        cname.write_text(f"{hostname}\n")
+    elif cname.exists():
+        # A published CNAME switches Pages to the custom domain and takes the default
+        # *.github.io URL down with it, so opting out has to remove the file.
+        cname.unlink()
     audit_published_catalog(site, published_before)
     return {"published": published, "aliases": len(aliases) + len(latest)}
 
@@ -552,10 +562,14 @@ def main() -> None:
     parser.add_argument("--site", type=Path, default=Path("site"))
     args = parser.parse_args()
     manifest = tomllib.loads(args.manifest.read_text())
-    base_url = manifest.get("site", {}).get("base_url")
+    site_config = manifest.get("site", {})
+    base_url = site_config.get("base_url")
     if not isinstance(base_url, str) or not base_url.startswith("https://"):
         raise ValidationError("manifest site.base_url must be an HTTPS URL")
-    result = build_site(base_url, read_lock(args.lock), args.site)
+    custom_domain = site_config.get("custom_domain", False)
+    if not isinstance(custom_domain, bool):
+        raise ValidationError("manifest site.custom_domain must be a boolean")
+    result = build_site(base_url, read_lock(args.lock), args.site, custom_domain=custom_domain)
     print(json.dumps(result, sort_keys=True))
 
 

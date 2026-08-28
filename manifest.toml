@@ -1,6 +1,12 @@
 [site]
 base_url = "https://schemas.columnzero.com"
 
-# Add one [[project]] block only after its release workflow publishes the
-# required schemas.tar.gz artifact and index.json contract. There are no schema
-# artifacts yet, so this manifest intentionally contains no projects.
+# Write a CNAME so Pages serves base_url. Leave this false until DNS for that
+# host resolves: publishing a CNAME switches Pages to the custom domain and
+# takes the default *.github.io URL down with it, so a premature CNAME leaves
+# nothing reachable to test against.
+custom_domain = false
+
+# Add one [[project]] block per upstream once its release workflow publishes a
+# schemas.tar.gz meeting the index.json contract. Only this repository's own
+# contract schema ships so far, and it is recorded in manifest.lock.

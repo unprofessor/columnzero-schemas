@@ -38,10 +38,14 @@ locked artifact:
 No other project has shipped a `schemas.tar.gz` yet, so `manifest.toml` still
 carries only the site configuration.
 
-The site is not reachable yet. `schemas.columnzero.com` has no DNS record; it
-needs a `CNAME` pointing at `unprofessor.github.io`, and GitHub Pages must be
-enabled on the `gh-pages` branch. Until both are done the publisher still builds
-and commits correctly, but nothing resolves.
+The `gh-pages` branch exists and carries this tree. The custom domain is not in
+use: `schemas.columnzero.com` has no DNS record, so `site.custom_domain` is
+`false` and no `CNAME` is published. Pages therefore serves the default
+`*.github.io` URL, which is testable today.
+
+Turning `custom_domain` on publishes a `CNAME`, which switches Pages to the
+custom domain and takes the default URL down with it. Do that only once DNS
+resolves. Turning it back off removes the file again.
 
 ## Upstream artifact contract
 
@@ -114,7 +118,9 @@ nothing and re-audits what is already there.
 
 The scheduled GitHub workflow copies the whole `gh-pages` tree into the build
 directory, regenerates the mutable resources around what is already there, and
-pushes the result back.
+pushes the result back. Both copies exclude `.git`: the published tree is a
+worktree whose `.git` is a file, and a `--delete` sync without that exclusion
+detaches the checkout mid-run.
 
 Two independent checks protect published bytes. Writing a canonical resource
 compares against what is already on disk and aborts on any difference. Then,

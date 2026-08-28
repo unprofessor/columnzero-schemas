@@ -157,7 +157,8 @@ class BuildSiteTests(unittest.TestCase):
             json.loads((site / "planr/index.json").read_text()),
             {"project": "planr", "versions": ["1.4.2"], "compat_lines": ["1"]},
         )
-        self.assertEqual((site / "CNAME").read_text(), "schemas.columnzero.com\n")
+        self.assertFalse((site / "CNAME").exists())
+        self.assertTrue((site / ".nojekyll").exists())
         self.assertEqual(
             json.loads((site / "index.json").read_text())["schemas"][0]["url"],
             f"{BASE_URL}/planr/v1/1.4.2/planr.schema.json",
@@ -375,6 +376,26 @@ class BuildSiteTests(unittest.TestCase):
             json.loads((site / "planr/index.json").read_text()),
             {"project": "planr", "versions": ["1.0.0-rc1"], "compat_lines": []},
         )
+
+    def test_custom_domain_is_opt_in_and_reversible(self):
+        site = self.root / "site"
+        czschemas.build_site(
+            BASE_URL,
+            [locked_artifact(self.root, "1.4.2")],
+            site,
+            on_download=file_download,
+            custom_domain=True,
+        )
+        self.assertEqual((site / "CNAME").read_text(), "schemas.columnzero.com\n")
+        # Turning it back off must remove the file, or Pages keeps serving the
+        # custom domain and the default *.github.io URL stays dark.
+        czschemas.build_site(
+            BASE_URL,
+            [locked_artifact(self.root, "1.4.2")],
+            site,
+            on_download=file_download,
+        )
+        self.assertFalse((site / "CNAME").exists())
 
     def test_extract_rejects_path_traversal(self):
         payload = BytesIO()
