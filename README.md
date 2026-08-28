@@ -39,11 +39,9 @@ Pages serves at the directory URL. Nothing restates the tree beneath it:
 | `/{project}/v{compat}/{version}/index.json` | the schemas in that release |
 | `/{project}/latest/index.json` | the schemas `latest/` currently serves |
 
-Walking from the root reaches everything published, one fetch per level. Each
-index is also a *witness* for the level below it: the line index names the
-versions that must exist, the release index names the schemas and their digests.
-That is what makes the tree self-describing, and it is why nothing in the build
-needs a separate record of what was published.
+Walking from the root reaches everything published, one fetch per level. Because
+each index describes the level below it, the tree is self-describing: the build
+learns what is already published by reading it, and needs no separate record.
 
 No index records *when* a resource went live. `gh-pages` is a git branch, so the
 commit that added the file already says, more accurately than a timestamp copied
@@ -186,31 +184,37 @@ pushes the result back. Both copies exclude `.git`: the published tree is a
 worktree whose `.git` is a file, and a `--delete` sync without that exclusion
 detaches the checkout mid-run.
 
-Four checks protect published bytes, and they fail on different things. **None of
-them reads the catalog** — it is derived output, so trusting it would only mean
-trusting a copy of the tree.
+Immutability is enforced by **git**, not by anything inside the tree. Once the
+rebuild is staged, the workflow refuses to publish if any path under a release
+directory is reported as modified, deleted, or renamed:
 
-1. **The tree vouching for itself**, read before the build starts. Every index is
-   checked against what actually exists one level down, and every schema is
-   re-hashed against the digest its release index records. This catches damage
-   that predates the build — an out-of-band deletion, a bad merge, a partial
-   push — before the build regenerates the index that would otherwise have
-   quietly stopped mentioning what went missing.
-2. **Release membership.** A release's schema set is compared against what its
-   release index says it contained. Check 3 cannot see this: adding a schema to
-   a published release creates a file with nothing to compare against.
-3. **Per-file, while writing.** Writing a canonical resource — a schema or a
-   release index — compares against what is already on disk and aborts on any
-   difference.
-4. **The same read, again, afterwards.** Check 1 is repeated once the tree has
-   been written, and everything it found the first time must still be there with
-   the same digest. That catches anything this build removed or altered, and
-   costs one walk rather than a second hashing pass of its own.
+```sh
+git diff --cached --name-status | python src/czschemas.py verify
+```
+
+Additions are not violations — publishing a new release is the point.
+
+This is deliberately a check the tree cannot influence. Any record kept *inside*
+the tree is editable by whoever edits the tree: drop the field an index is
+checked on and the check vanishes with it, and a release deleted along with the
+index that listed it leaves nothing behind to notice. The previous commit is not
+reachable from the working copy, so the same edit cannot scrub the evidence.
+
+Git is also where to look for when a resource went live, and for any violation
+committed before this check existed:
+
+```sh
+git log --diff-filter=A  --format='%aI' origin/gh-pages -- {path}
+git log --diff-filter=DM --format='%h %aI %s' --name-only origin/gh-pages
+```
+
+Writing a canonical resource still compares against what is on disk and aborts on
+a difference. That is a convenience — a local build fails at the point of cause,
+with a precise message — not the guarantee. The guarantee is the git check.
 
 Structurally, the purge that clears stale aliases walks a compat line file by
 file and never recurses, so no code path in the publisher can remove a release
-directory. Check 4 exists because that is an argument about the code as written,
-not a property the code enforces about itself.
+directory.
 
 ## Lockfile completeness
 

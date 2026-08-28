@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -39,6 +40,8 @@ COMPAT_LINE = re.compile(r"^(?:[1-9]\d*|0\.(?:0|[1-9]\d*))$")
 # Canonical schema files and release directories share a parent, so their names must not
 # be able to collide.  No SemVer version can end in this suffix, and no index.json can.
 SCHEMA_SUFFIX = ".schema.json"
+# {project}/v{compat}/{version}/... - everything below a release directory is canonical.
+CANONICAL_PATH = re.compile(r"^[^/]+/v[^/]+/[^/]+/")
 GITHUB_DOWNLOAD_HOSTS = {
     "github.com",
     "objects.githubusercontent.com",
@@ -421,46 +424,47 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def changed_canonical_paths(name_status: str) -> list[str]:
+    """Canonical paths a `git diff --name-status` reports as modified, deleted, or renamed.
+
+    Immutability is enforced against git rather than against anything inside the tree.
+    A record kept in the tree can be edited by whoever edits the tree - drop the field
+    an index is checked on and the check disappears with it - whereas the previous
+    commit is not reachable from the working copy.  Additions are not violations:
+    publishing a new release is the point.
+    """
+    violations: list[str] = []
+    for line in name_status.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        kind = fields[0][:1]
+        # For a rename the source path comes first, and it is the one that disappears.
+        if kind in {"D", "M", "R"} and CANONICAL_PATH.match(fields[1]):
+            violations.append(f"{kind} {fields[1]}")
+    return violations
+
+
 def read_published(site: Path, base_url: str) -> list[dict[str, str]]:
-    """Read what the tree says is published, checking its own indexes as it goes.
+    """Read what the tree already publishes.
 
-    The filesystem is the record.  Directory names give project, compat line, and
-    version; the release index gives membership and dialects; the bytes give the
-    digests.  Each index is also a witness for the level below it, so a
-    version its line index lists but that no longer exists - or a schema its release
-    index lists but that is gone - is caught here, before the build regenerates the
-    index that would otherwise have quietly stopped mentioning it.
-
-    A tree published before those indexes existed simply offers fewer witnesses.  The
-    walk still finds everything; only the cross-checks it cannot make are skipped.
+    The filesystem is the record: directory names give project, compat line, and
+    version, the release index gives dialects and canonical URLs, and the bytes give
+    the digests.  This establishes what exists so the build can regenerate the indexes
+    around it.  It verifies nothing - `changed_canonical_paths` does that against git,
+    the one record the tree cannot rewrite.
     """
     records: list[dict[str, str]] = []
     if not site.is_dir():
         return records
     root = base_url.rstrip("/")
-    projects = sorted(entry for entry in site.iterdir() if entry.is_dir())
-    vouches_for(site / "index.json", "projects", [entry.name for entry in projects], "project")
-    for project_dir in projects:
+    for project_dir in sorted(entry for entry in site.iterdir() if entry.is_dir()):
         project = project_dir.name
         require_safe_segment(project, "published project")
-        lines = sorted(entry for entry in project_dir.glob("v*") if entry.is_dir())
-        vouches_for(
-            project_dir / "index.json",
-            "compat_lines",
-            [entry.name[1:] for entry in lines],
-            f"{project} compat line",
-        )
-        for line_dir in lines:
+        for line_dir in sorted(entry for entry in project_dir.glob("v*") if entry.is_dir()):
             compat = line_dir.name[1:]
             require_compat_line(compat)
-            releases = sorted(entry for entry in line_dir.iterdir() if entry.is_dir())
-            vouches_for(
-                line_dir / "index.json",
-                "versions",
-                [entry.name for entry in releases],
-                f"{project} v{compat} release",
-            )
-            for release_dir in releases:
+            for release_dir in sorted(entry for entry in line_dir.iterdir() if entry.is_dir()):
                 version = release_dir.name
                 require_safe_segment(version, "published version")
                 stable_version_key(version)
@@ -468,25 +472,10 @@ def read_published(site: Path, base_url: str) -> list[dict[str, str]]:
     return records
 
 
-def vouches_for(index_path: Path, field: str, present: list[str], label: str) -> None:
-    """An index names what should exist one level down; nothing it names may be gone."""
-    if not index_path.is_file():
-        return
-    listed = read_json_object(index_path).get(field)
-    if not isinstance(listed, list):
-        return
-    for name in listed:
-        if isinstance(name, str) and name not in present:
-            raise ImmutabilityError(
-                f"published {label} {name!r} is listed by {index_path.name}"
-                " but no longer exists"
-            )
-
-
 def read_release(
     release_dir: Path, root: str, project: str, compat: str, version: str
 ) -> list[dict[str, str]]:
-    """Records for one release directory, cross-checked against its own index."""
+    """Records for one release directory. Digests are computed to publish, not to police."""
     on_disk = sorted(
         entry.name
         for entry in release_dir.iterdir()
@@ -495,26 +484,15 @@ def read_release(
     index_path = release_dir / "index.json"
     listed: dict[str, dict[str, str]] = {}
     if index_path.is_file():
-        index = read_json_object(index_path)
-        for entry in index.get("schemas", []):
-            if not isinstance(entry, dict) or not isinstance(entry.get("schema"), str):
-                raise ValidationError(f"{index_path}: malformed schema entry")
-            listed[entry["schema"]] = entry
-        if sorted(listed) != on_disk:
-            raise ImmutabilityError(
-                f"published release {project} {version} no longer matches its index:"
-                f" index lists {sorted(listed)}, directory holds {on_disk}"
-            )
+        for entry in read_json_object(index_path).get("schemas", []):
+            if isinstance(entry, dict) and isinstance(entry.get("schema"), str):
+                listed[entry["schema"]] = entry
     records: list[dict[str, str]] = []
     for name in on_disk:
         require_schema_basename(name)
         body = (release_dir / name).read_bytes()
         digest = hashlib.sha256(body).hexdigest()
         entry = listed.get(name, {})
-        if entry.get("sha256") and entry["sha256"] != digest:
-            raise ImmutabilityError(
-                f"published resource was modified: {project}/v{compat}/{version}/{name}"
-            )
         record = {
             "project": project,
             "version": version,
@@ -540,68 +518,6 @@ def declared_dialect(path: Path, body: bytes) -> str:
     return dialect
 
 
-def require_release_membership(
-    published_before: list[dict[str, str]], documents: list[SchemaDocument]
-) -> None:
-    """A published release's schema set is fixed.
-
-    `atomic_write` cannot see this on its own: adding a schema to a release creates a
-    file with nothing to compare against, and the release index only guards a release
-    that already has one.  The catalog is the record of what a release contained, so it
-    is what closes the gap for releases published before release indexes existed.
-    """
-    prior: dict[tuple[str, str], set[str]] = {}
-    for record in published_before:
-        prior.setdefault((record["project"], record["version"]), set()).add(record["schema"])
-    current: dict[tuple[str, str], set[str]] = {}
-    for document in documents:
-        key = (document.artifact.project, document.artifact.version)
-        current.setdefault(key, set()).add(document.basename)
-    for (project, version), schemas in sorted(current.items()):
-        was = prior.get((project, version))
-        if was is not None and was != schemas:
-            added = sorted(schemas - was)
-            removed = sorted(was - schemas)
-            detail = "; ".join(
-                part
-                for part in (
-                    f"added {', '.join(added)}" if added else "",
-                    f"removed {', '.join(removed)}" if removed else "",
-                )
-                if part
-            )
-            raise ImmutabilityError(
-                f"published release {project} {version} changed membership: {detail}"
-            )
-
-
-def audit_unchanged(
-    site: Path, before: list[dict[str, str]], after: list[dict[str, str]]
-) -> None:
-    """Nothing that was already published may be removed or altered by a build.
-
-    Both sides come from `read_published`, so this reuses the walk that established
-    what was there rather than hashing the whole tree a second time.
-    """
-    current = {
-        (record["project"], record["version"], record["schema"]): record["sha256"]
-        for record in after
-    }
-    for record in before:
-        key = (record["project"], record["version"], record["schema"])
-        if key not in current:
-            raise ImmutabilityError(f"published resource was removed: {record['url']}")
-        if current[key] != record["sha256"]:
-            raise ImmutabilityError(f"published resource was modified: {record['url']}")
-    for project, compat, version in sorted(
-        {(record["project"], record["compat"], record["version"]) for record in after}
-    ):
-        if not (site / project / f"v{compat}" / version / "index.json").is_file():
-            raise ImmutabilityError(
-                f"release index was removed: {project}/v{compat}/{version}/index.json"
-            )
-
-
 def build_site(
     base_url: str,
     artifacts: list[LockedArtifact],
@@ -618,7 +534,6 @@ def build_site(
         (record["project"], record["version"], record["schema"]): record
         for record in published_before
     }
-    require_release_membership(published_before, documents)
     aliases: dict[tuple[str, str, str], SchemaDocument] = {}
     latest: dict[tuple[str, str], SchemaDocument] = {}
     released_documents: list[SchemaDocument] = []
@@ -745,7 +660,6 @@ def build_site(
         # A published CNAME switches Pages to the custom domain and takes the default
         # *.github.io URL down with it, so opting out has to remove the file.
         cname.unlink()
-    audit_unchanged(site, published_before, read_published(site, base_url))
     return {"published": published, "aliases": len(aliases) + len(latest)}
 
 
@@ -776,11 +690,20 @@ def read_lock(path: Path) -> list[LockedArtifact]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["build"])
+    parser.add_argument("command", choices=["build", "verify"])
     parser.add_argument("--manifest", type=Path, default=Path("manifest.toml"))
     parser.add_argument("--lock", type=Path, default=Path("manifest.lock"))
     parser.add_argument("--site", type=Path, default=Path("site"))
     args = parser.parse_args()
+    if args.command == "verify":
+        violations = changed_canonical_paths(sys.stdin.read())
+        if violations:
+            print("refusing to publish: canonical resources would change", file=sys.stderr)
+            for violation in violations:
+                print(f"  {violation}", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps({"violations": 0}))
+        return
     manifest = tomllib.loads(args.manifest.read_text())
     site_config = manifest.get("site", {})
     base_url = site_config.get("base_url")

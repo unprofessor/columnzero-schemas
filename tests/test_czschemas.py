@@ -342,30 +342,6 @@ class BuildSiteTests(unittest.TestCase):
         with self.assertRaisesRegex(czschemas.ValidationError, "schema.json"):
             czschemas.build_site(BASE_URL, [locked], self.root / "site", on_download=file_download)
 
-    def test_build_aborts_when_a_published_release_has_gone_missing(self):
-        site = self.root / "site"
-        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
-        (site / "planr/v1/1.4.2/planr.schema.json").unlink()
-        with self.assertRaisesRegex(czschemas.ImmutabilityError, "no longer matches its index"):
-            czschemas.build_site(
-                BASE_URL,
-                [locked_artifact(self.root, "1.5.0")],
-                site,
-                on_download=file_download,
-            )
-
-    def test_build_aborts_when_a_published_release_was_edited_out_of_band(self):
-        site = self.root / "site"
-        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
-        (site / "planr/v1/1.4.2/planr.schema.json").write_bytes(b"{}")
-        with self.assertRaisesRegex(czschemas.ImmutabilityError, "was modified"):
-            czschemas.build_site(
-                BASE_URL,
-                [locked_artifact(self.root, "1.5.0")],
-                site,
-                on_download=file_download,
-            )
-
     def test_build_refuses_to_orphan_a_published_compat_line(self):
         site = self.root / "site"
         czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
@@ -427,46 +403,6 @@ class BuildSiteTests(unittest.TestCase):
         )
         self.assertFalse((site / "CNAME").exists())
 
-    def test_a_build_that_deletes_a_release_is_caught(self):
-        """Defence in depth: if purge ever recursed, re-reading the tree catches it."""
-        site = self.root / "site"
-        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
-        original = czschemas.purge_mutable_paths
-
-        def destructive(site_path, projects):
-            for project in projects:
-                shutil.rmtree(site_path / project / "v1" / "1.4.2", ignore_errors=True)
-            original(site_path, projects)
-
-        czschemas.purge_mutable_paths = destructive
-        try:
-            # 1.4.2 is no longer locked, so nothing rewrites what purge destroyed.
-            with self.assertRaisesRegex(czschemas.ImmutabilityError, "no longer exists"):
-                czschemas.build_site(
-                    BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download
-                )
-        finally:
-            czschemas.purge_mutable_paths = original
-
-    def test_a_build_that_deletes_a_release_index_is_caught(self):
-        site = self.root / "site"
-        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
-        original = czschemas.purge_mutable_paths
-
-        def destructive(site_path, projects):
-            for project in projects:
-                (site_path / project / "v1" / "1.4.2" / "index.json").unlink(missing_ok=True)
-            original(site_path, projects)
-
-        czschemas.purge_mutable_paths = destructive
-        try:
-            with self.assertRaisesRegex(czschemas.ImmutabilityError, r"1\.4\.2/index\.json"):
-                czschemas.build_site(
-                    BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download
-                )
-        finally:
-            czschemas.purge_mutable_paths = original
-
     def test_every_level_of_the_hierarchy_resolves(self):
         site = self.root / "site"
         czschemas.build_site(
@@ -502,14 +438,6 @@ class BuildSiteTests(unittest.TestCase):
         line = json.loads((site / "planr/v1/index.json").read_text())
         for version in line["versions"]:
             self.assertTrue((site / f"planr/v1/{version}/index.json").is_file(), version)
-
-    def test_release_membership_is_fixed_even_without_an_existing_index(self):
-        site = self.root / "site"
-        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
-        (site / "planr/v1/1.4.2/index.json").unlink()
-        grown = locked_multi(self.root, "1.4.2", ["planr.schema.json", "task.schema.json"])
-        with self.assertRaisesRegex(czschemas.ImmutabilityError, "changed membership"):
-            czschemas.build_site(BASE_URL, [grown], site, on_download=file_download)
 
     def test_release_index_tampering_is_rejected(self):
         site = self.root / "site"
@@ -554,30 +482,6 @@ class BuildSiteTests(unittest.TestCase):
             json.loads((site / "planr/v1/index.json").read_text())["versions"], ["1.4.2", "1.5.0"]
         )
 
-    def test_a_line_index_vouches_for_a_release_directory(self):
-        site = self.root / "site"
-        czschemas.build_site(
-            BASE_URL,
-            [locked_artifact(self.root, "1.4.2"), locked_artifact(self.root, "1.5.0")],
-            site,
-            on_download=file_download,
-        )
-        shutil.rmtree(site / "planr/v1/1.4.2")
-        with self.assertRaisesRegex(czschemas.ImmutabilityError, r"release '1\.4\.2' is listed"):
-            czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download)
-
-    def test_a_project_index_vouches_for_a_compat_line(self):
-        site = self.root / "site"
-        czschemas.build_site(
-            BASE_URL,
-            [locked_artifact(self.root, "1.4.2"), locked_artifact(self.root, "2.0.0")],
-            site,
-            on_download=file_download,
-        )
-        shutil.rmtree(site / "planr/v1")
-        with self.assertRaisesRegex(czschemas.ImmutabilityError, r"compat line '1' is listed"):
-            czschemas.build_site(BASE_URL, [locked_artifact(self.root, "2.0.0")], site, on_download=file_download)
-
     def test_extract_rejects_path_traversal(self):
         payload = BytesIO()
         with tarfile.open(fileobj=payload, mode="w:gz") as archive:
@@ -589,6 +493,49 @@ class BuildSiteTests(unittest.TestCase):
         archive_path.write_bytes(payload.getvalue())
         with self.assertRaisesRegex(czschemas.ValidationError, "unsafe archive path"):
             czschemas.read_artifact(archive_path)
+
+
+class ChangedCanonicalPathsTests(unittest.TestCase):
+    """Immutability is enforced against git; this is the whole of that check."""
+
+    def check(self, name_status: str) -> list[str]:
+        return czschemas.changed_canonical_paths(name_status)
+
+    def test_modification_deletion_and_rename_of_a_release_file_are_violations(self):
+        for status, expected in (
+            ("M\tplanr/v1/1.4.2/planr.schema.json", ["M planr/v1/1.4.2/planr.schema.json"]),
+            ("D\tplanr/v1/1.4.2/planr.schema.json", ["D planr/v1/1.4.2/planr.schema.json"]),
+            ("M\tplanr/v1/1.4.2/index.json", ["M planr/v1/1.4.2/index.json"]),
+            ("R100\tplanr/v1/1.4.2/a.schema.json\tplanr/v1/1.4.2/b.schema.json",
+             ["R planr/v1/1.4.2/a.schema.json"]),
+        ):
+            self.assertEqual(self.check(status), expected, status)
+
+    def test_additions_are_not_violations(self):
+        """Publishing a new release is the point."""
+        self.assertEqual(self.check("A\tplanr/v1/1.5.0/planr.schema.json"), [])
+        self.assertEqual(self.check("A\tplanr/v2/2.0.0/index.json"), [])
+
+    def test_mutable_resources_may_change_freely(self):
+        for status in (
+            "M\tindex.json",
+            "M\tcatalog.json",
+            "M\tplanr/index.json",
+            "M\tplanr/v1/index.json",
+            "M\tplanr/v1/planr.schema.json",
+            "D\tplanr/latest/task.schema.json",
+            "M\tCNAME",
+        ):
+            self.assertEqual(self.check(status), [], status)
+
+    def test_a_whole_release_directory_being_deleted_is_caught(self):
+        self.assertEqual(
+            self.check("D\tplanr/v1/1.4.2/index.json\nD\tplanr/v1/1.4.2/planr.schema.json"),
+            ["D planr/v1/1.4.2/index.json", "D planr/v1/1.4.2/planr.schema.json"],
+        )
+
+    def test_blank_and_malformed_lines_are_ignored(self):
+        self.assertEqual(self.check("\n\nM\n   \n"), [])
 
 
 if __name__ == "__main__":
