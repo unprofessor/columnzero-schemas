@@ -68,6 +68,23 @@ parent from ever colliding:
 - every schema file must be named `<name>.schema.json`. No SemVer version can
   end in that suffix, so an alias file can never shadow a version directory.
 
+## Self-test
+
+`selftest/` holds this repository's own schema: `schema-index.schema.json`, which
+describes the artifact `index.json` above. Upstreams can validate against it, and
+because the artifact carries both the schema and an index conforming to it, it is
+the one artifact that checks its own payload.
+
+```sh
+.venv/bin/python selftest/pack.py    # deterministic selftest/schemas.tar.gz + sha256
+```
+
+`tests/test_selftest.py` rebuilds the archive, asserts it is byte-reproducible,
+validates the index against the shipped schema, and — once the artifact is locked —
+asserts the recorded SHA-256 still matches the source tree. Editing the schema after
+release therefore fails the suite rather than silently diverging from the published
+bytes; the fix is a new release, never a republish.
+
 ## Development
 
 ```sh

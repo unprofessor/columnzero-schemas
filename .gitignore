@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 site/
+selftest/schemas.tar.gz
