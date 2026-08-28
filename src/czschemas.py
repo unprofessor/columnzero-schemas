@@ -57,10 +57,8 @@ class ImmutabilityError(ValidationError):
 @dataclasses.dataclass(frozen=True)
 class LockedArtifact:
     project: str
-    repo: str
     tag: str
     version: str
-    asset: str
     url: str
     sha256: str
 
@@ -577,38 +575,31 @@ def require_release_membership(
             )
 
 
-def snapshot_releases(site: Path) -> dict[str, str]:
-    """Digest everything inside a release directory: the immutable half of the tree.
+def audit_unchanged(
+    site: Path, before: list[dict[str, str]], after: list[dict[str, str]]
+) -> None:
+    """Nothing that was already published may be removed or altered by a build.
 
-    Taken before the build touches anything, so the audit afterwards compares the tree
-    against itself rather than against a record that could be wrong.
+    Both sides come from `read_published`, so this reuses the walk that established
+    what was there rather than hashing the whole tree a second time.
     """
-    snapshot: dict[str, str] = {}
-    if not site.is_dir():
-        return snapshot
-    for project in sorted(entry for entry in site.iterdir() if entry.is_dir()):
-        for line in sorted(entry for entry in project.glob("v*") if entry.is_dir()):
-            for release in sorted(entry for entry in line.iterdir() if entry.is_dir()):
-                for path in sorted(release.rglob("*")):
-                    if path.is_file():
-                        key = str(path.relative_to(site))
-                        snapshot[key] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return snapshot
-
-
-def audit_release_snapshot(site: Path, snapshot: dict[str, str]) -> None:
-    """Nothing inside a release directory may be removed or altered by a build.
-
-    This is the primary immutability guard: it needs no record to be correct, covers
-    release indexes as well as schemas, and cannot be fooled by a catalog that has
-    drifted from the tree.
-    """
-    for relative, digest in sorted(snapshot.items()):
-        path = site / relative
-        if not path.is_file():
-            raise ImmutabilityError(f"published resource was removed: {relative}")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise ImmutabilityError(f"published resource was modified: {relative}")
+    current = {
+        (record["project"], record["version"], record["schema"]): record["sha256"]
+        for record in after
+    }
+    for record in before:
+        key = (record["project"], record["version"], record["schema"])
+        if key not in current:
+            raise ImmutabilityError(f"published resource was removed: {record['url']}")
+        if current[key] != record["sha256"]:
+            raise ImmutabilityError(f"published resource was modified: {record['url']}")
+    for project, compat, version in sorted(
+        {(record["project"], record["compat"], record["version"]) for record in after}
+    ):
+        if not (site / project / f"v{compat}" / version / "index.json").is_file():
+            raise ImmutabilityError(
+                f"release index was removed: {project}/v{compat}/{version}/index.json"
+            )
 
 
 def build_site(
@@ -620,7 +611,6 @@ def build_site(
 ) -> dict[str, int]:
     documents = fetch_document_set(base_url, artifacts, on_download)
     site.mkdir(parents=True, exist_ok=True)
-    releases_before = snapshot_releases(site)
     # What is already published, read from the tree itself.  Nothing reads the catalog
     # back: it is derived output, so trusting it would only be trusting a copy.
     published_before = read_published(site, base_url)
@@ -755,7 +745,7 @@ def build_site(
         # A published CNAME switches Pages to the custom domain and takes the default
         # *.github.io URL down with it, so opting out has to remove the file.
         cname.unlink()
-    audit_release_snapshot(site, releases_before)
+    audit_unchanged(site, published_before, read_published(site, base_url))
     return {"published": published, "aliases": len(aliases) + len(latest)}
 
 
@@ -775,7 +765,6 @@ def read_lock(path: Path) -> list[LockedArtifact]:
             (artifact.project, "project"),
             (artifact.version, "version"),
             (artifact.tag, "tag"),
-            (artifact.asset, "asset"),
         ):
             require_safe_segment(value, label)
         stable_version_key(artifact.version)

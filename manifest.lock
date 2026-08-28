@@ -6,9 +6,7 @@
 
 [[artifact]]
 project = "columnzero-schemas"
-repo = "unprofessor/columnzero-schemas"
 tag = "schemas-v1.0.0"
 version = "1.0.0"
-asset = "schemas.tar.gz"
 url = "https://github.com/unprofessor/columnzero-schemas/releases/download/schemas-v1.0.0/schemas.tar.gz"
 sha256 = "aba2cac7a822416c365dd785baae8e223896e073506c3e3afc9f289bccf1347a"

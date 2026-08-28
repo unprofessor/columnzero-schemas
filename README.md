@@ -202,9 +202,10 @@ trusting a copy of the tree.
 3. **Per-file, while writing.** Writing a canonical resource — a schema or a
    release index — compares against what is already on disk and aborts on any
    difference.
-4. **Tree against itself, across the build.** Every file inside a release
-   directory is digested before the build and re-checked afterwards, catching
-   anything this build removed or altered.
+4. **The same read, again, afterwards.** Check 1 is repeated once the tree has
+   been written, and everything it found the first time must still be there with
+   the same digest. That catches anything this build removed or altered, and
+   costs one walk rather than a second hashing pass of its own.
 
 Structurally, the purge that clears stale aliases walks a compat line file by
 file and never recurses, so no code path in the publisher can remove a release

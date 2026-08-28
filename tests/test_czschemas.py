@@ -81,10 +81,8 @@ def locked_artifact(directory: Path, version: str, compat: str | None = None, bo
     path.write_bytes(payload)
     return czschemas.LockedArtifact(
         project="planr",
-        repo="unprofessor/planr-rs",
         tag=f"v{version}",
         version=version,
-        asset="schemas.tar.gz",
         url=path.as_uri(),
         sha256=hashlib.sha256(payload).hexdigest(),
     )
@@ -96,10 +94,8 @@ def locked_github_artifact(directory: Path, version: str, payload_bytes: bytes) 
     path.write_bytes(payload_bytes)
     return czschemas.LockedArtifact(
         project="planr",
-        repo="unprofessor/planr-rs",
         tag=f"v{version}",
         version=version,
-        asset="schemas.tar.gz",
         url=f"https://github.com/unprofessor/planr-rs/releases/download/v{version}/schemas.tar.gz",
         sha256=hashlib.sha256(payload_bytes).hexdigest(),
     )
@@ -118,10 +114,8 @@ def locked_multi(directory: Path, version: str, names: list[str]) -> czschemas.L
     path.write_bytes(payload)
     return czschemas.LockedArtifact(
         project="planr",
-        repo="unprofessor/planr-rs",
         tag=f"v{version}",
         version=version,
-        asset="schemas.tar.gz",
         url=path.as_uri(),
         sha256=hashlib.sha256(payload).hexdigest(),
     )
@@ -340,10 +334,8 @@ class BuildSiteTests(unittest.TestCase):
         path.write_bytes(payload)
         locked = czschemas.LockedArtifact(
             project="planr",
-            repo="unprofessor/planr-rs",
             tag="v1.4.2",
             version="1.4.2",
-            asset="schemas.tar.gz",
             url=path.as_uri(),
             sha256=hashlib.sha256(payload).hexdigest(),
         )
@@ -435,8 +427,8 @@ class BuildSiteTests(unittest.TestCase):
         )
         self.assertFalse((site / "CNAME").exists())
 
-    def test_snapshot_audit_catches_a_build_that_deletes_a_release(self):
-        """Defence in depth: if purge ever recursed, the snapshot would catch it."""
+    def test_a_build_that_deletes_a_release_is_caught(self):
+        """Defence in depth: if purge ever recursed, re-reading the tree catches it."""
         site = self.root / "site"
         czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
         original = czschemas.purge_mutable_paths
@@ -449,18 +441,16 @@ class BuildSiteTests(unittest.TestCase):
         czschemas.purge_mutable_paths = destructive
         try:
             # 1.4.2 is no longer locked, so nothing rewrites what purge destroyed.
-            with self.assertRaisesRegex(czschemas.ImmutabilityError, "was removed"):
+            with self.assertRaisesRegex(czschemas.ImmutabilityError, "no longer exists"):
                 czschemas.build_site(
                     BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download
                 )
         finally:
             czschemas.purge_mutable_paths = original
 
-    def test_snapshot_audit_covers_release_indexes_the_catalog_does_not(self):
+    def test_a_build_that_deletes_a_release_index_is_caught(self):
         site = self.root / "site"
         czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
-        catalog = json.loads((site / "catalog.json").read_text())["schemas"]
-        self.assertNotIn("index.json", [record["schema"] for record in catalog])
         original = czschemas.purge_mutable_paths
 
         def destructive(site_path, projects):
