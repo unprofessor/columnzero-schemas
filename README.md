@@ -45,6 +45,14 @@ versions that must exist, the release index names the schemas and their digests.
 That is what makes the tree self-describing, and it is why nothing in the build
 needs a separate record of what was published.
 
+No index records *when* a resource went live. `gh-pages` is a git branch, so the
+commit that added the file already says, more accurately than a timestamp copied
+out of a lockfile could:
+
+```sh
+git log --diff-filter=A --format='%aI' origin/gh-pages -- {path}
+```
+
 The release index is the only immutable one. It is rebuilt from the catalog on
 every run rather than from the current lockfile, so every release that has ever
 been published has one — including releases that have since left the lockfile,

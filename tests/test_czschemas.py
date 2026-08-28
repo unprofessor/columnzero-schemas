@@ -87,7 +87,6 @@ def locked_artifact(directory: Path, version: str, compat: str | None = None, bo
         asset="schemas.tar.gz",
         url=path.as_uri(),
         sha256=hashlib.sha256(payload).hexdigest(),
-        published_at="2026-08-01T00:00:00Z",
     )
 
 
@@ -103,7 +102,6 @@ def locked_github_artifact(directory: Path, version: str, payload_bytes: bytes) 
         asset="schemas.tar.gz",
         url=f"https://github.com/unprofessor/planr-rs/releases/download/v{version}/schemas.tar.gz",
         sha256=hashlib.sha256(payload_bytes).hexdigest(),
-        published_at="2026-08-01T00:00:00Z",
     )
 
 
@@ -126,7 +124,6 @@ def locked_multi(directory: Path, version: str, names: list[str]) -> czschemas.L
         asset="schemas.tar.gz",
         url=path.as_uri(),
         sha256=hashlib.sha256(payload).hexdigest(),
-        published_at="2026-08-01T00:00:00Z",
     )
 
 
@@ -178,7 +175,6 @@ class BuildSiteTests(unittest.TestCase):
                 "dialect": DIALECT,
                 "url": f"{BASE_URL}/planr/v1/1.4.2/planr.schema.json",
                 "sha256": hashlib.sha256(canonical.read_bytes()).hexdigest(),
-                "published_at": "2026-08-01T00:00:00Z",
             }],
         )
         self.assertEqual(
@@ -350,7 +346,6 @@ class BuildSiteTests(unittest.TestCase):
             asset="schemas.tar.gz",
             url=path.as_uri(),
             sha256=hashlib.sha256(payload).hexdigest(),
-            published_at="2026-08-01T00:00:00Z",
         )
         with self.assertRaisesRegex(czschemas.ValidationError, "schema.json"):
             czschemas.build_site(BASE_URL, [locked], self.root / "site", on_download=file_download)

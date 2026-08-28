@@ -82,7 +82,6 @@ class SelfTestArtifactTests(unittest.TestCase):
             asset="schemas.tar.gz",
             url=f"https://github.com/unprofessor/columnzero-schemas/releases/download/schemas-v{pack.RELEASE}/schemas.tar.gz",
             sha256=hashlib.sha256(self.payload).hexdigest(),
-            published_at="2026-08-28T00:00:00Z",
         )
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory) / "site"

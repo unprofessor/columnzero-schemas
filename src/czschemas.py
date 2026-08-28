@@ -63,7 +63,6 @@ class LockedArtifact:
     asset: str
     url: str
     sha256: str
-    published_at: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -336,16 +335,14 @@ def write_json(path: Path, value: Any) -> None:
 
 
 def release_index(project: str, compat: str, version: str, records: list[dict[str, str]]) -> dict[str, Any]:
-    """Describe one release: its membership, digests, dialects, and publication time.
+    """Describe one release: its membership, digests, and dialects.
 
     This is the tree's own record of a release.  Everything the catalog holds is
     derivable from these plus the directory names around them, which is why nothing in
-    the build ever reads the catalog back.
+    the build ever reads the catalog back.  When a resource went live is not recorded
+    here: `gh-pages` is a git branch, so the commit that added it already says.
     """
-    published_at = next(
-        (record["published_at"] for record in records if record.get("published_at")), None
-    )
-    index: dict[str, Any] = {
+    return {
         "project": project,
         "version": version,
         "compat": compat,
@@ -359,9 +356,6 @@ def release_index(project: str, compat: str, version: str, records: list[dict[st
             for record in sorted(records, key=lambda record: record["schema"])
         ],
     }
-    if published_at is not None:
-        index["published_at"] = published_at
-    return index
 
 
 def stable_version_key(version: str) -> tuple[int, int, int, str]:
@@ -393,7 +387,6 @@ def alias_record(base_url: str, document: SchemaDocument) -> dict[str, str]:
         "dialect": document.dialect,
         "url": canonical_url(base_url, document),
         "sha256": hashlib.sha256(document.body).hexdigest(),
-        "published_at": document.artifact.published_at,
     }
 
 
@@ -434,8 +427,8 @@ def read_published(site: Path, base_url: str) -> list[dict[str, str]]:
     """Read what the tree says is published, checking its own indexes as it goes.
 
     The filesystem is the record.  Directory names give project, compat line, and
-    version; the release index gives membership, dialects, and publication time; the
-    bytes give the digests.  Each index is also a witness for the level below it, so a
+    version; the release index gives membership and dialects; the bytes give the
+    digests.  Each index is also a witness for the level below it, so a
     version its line index lists but that no longer exists - or a schema its release
     index lists but that is gone - is caught here, before the build regenerates the
     index that would otherwise have quietly stopped mentioning it.
@@ -503,10 +496,8 @@ def read_release(
     )
     index_path = release_dir / "index.json"
     listed: dict[str, dict[str, str]] = {}
-    published_at: Any = None
     if index_path.is_file():
         index = read_json_object(index_path)
-        published_at = index.get("published_at")
         for entry in index.get("schemas", []):
             if not isinstance(entry, dict) or not isinstance(entry.get("schema"), str):
                 raise ValidationError(f"{index_path}: malformed schema entry")
@@ -535,8 +526,6 @@ def read_release(
             "url": entry.get("url") or f"{root}/{project}/v{compat}/{version}/{name}",
             "sha256": digest,
         }
-        if isinstance(published_at, str):
-            record["published_at"] = published_at
         records.append(record)
     return records
 
@@ -664,7 +653,6 @@ def build_site(
             "dialect": document.dialect,
             "url": canonical_url(base_url, document),
             "sha256": hashlib.sha256(document.body).hexdigest(),
-            "published_at": document.artifact.published_at,
         }
         if "-" not in document.artifact.version:
             released_documents.append(document)
