@@ -409,12 +409,49 @@ def require_alias_coverage(
             )
 
 
-def audit_published_catalog(site: Path, records: list[dict[str, str]]) -> None:
-    """Verify every previously published canonical resource survived the rebuild.
+def snapshot_releases(site: Path) -> dict[str, str]:
+    """Digest everything inside a release directory: the immutable half of the tree.
 
-    The catalog records the URL and digest of each release, so this closes the loop that
-    `atomic_write` cannot: that check only catches a resource that *changed*, while this
-    also catches one that was deleted or truncated by a bug elsewhere in the build.
+    Taken before the build touches anything, so the audit afterwards compares the tree
+    against itself rather than against a record that could be wrong.
+    """
+    snapshot: dict[str, str] = {}
+    if not site.is_dir():
+        return snapshot
+    for project in sorted(entry for entry in site.iterdir() if entry.is_dir()):
+        for line in sorted(entry for entry in project.glob("v*") if entry.is_dir()):
+            for release in sorted(entry for entry in line.iterdir() if entry.is_dir()):
+                for path in sorted(release.rglob("*")):
+                    if path.is_file():
+                        key = str(path.relative_to(site))
+                        snapshot[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return snapshot
+
+
+def audit_release_snapshot(site: Path, snapshot: dict[str, str]) -> None:
+    """Nothing inside a release directory may be removed or altered by a build.
+
+    This is the primary immutability guard: it needs no record to be correct, covers
+    release indexes as well as schemas, and cannot be fooled by a catalog that has
+    drifted from the tree.
+    """
+    for relative, digest in sorted(snapshot.items()):
+        path = site / relative
+        if not path.is_file():
+            raise ImmutabilityError(f"published resource was removed: {relative}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ImmutabilityError(f"published resource was modified: {relative}")
+
+
+def audit_published_catalog(site: Path, records: list[dict[str, str]]) -> None:
+    """Verify the published record and the published bytes still agree.
+
+    This is not a second copy of `audit_release_snapshot`.  The snapshot compares the
+    tree to itself and so can only see damage this build caused; it would accept a
+    resource that went missing yesterday as the new baseline.  The catalog is a
+    committed record of what was published, so comparing against it catches damage that
+    predates the build - an out-of-band deletion, a bad merge, a partial push - which
+    would otherwise leave the catalog advertising a URL that 404s.
     """
     for record in records:
         path = site / record["project"] / f"v{record['compat']}" / record["version"] / record["schema"]
@@ -433,6 +470,7 @@ def build_site(
 ) -> dict[str, int]:
     documents = fetch_document_set(base_url, artifacts, on_download)
     site.mkdir(parents=True, exist_ok=True)
+    releases_before = snapshot_releases(site)
     catalog_by_key: dict[tuple[str, str, str], dict[str, str]] = {}
     old_catalog = site / "index.json"
     if old_catalog.exists():
@@ -560,6 +598,7 @@ def build_site(
         # A published CNAME switches Pages to the custom domain and takes the default
         # *.github.io URL down with it, so opting out has to remove the file.
         cname.unlink()
+    audit_release_snapshot(site, releases_before)
     audit_published_catalog(site, published_before)
     return {"published": published, "aliases": len(aliases) + len(latest)}
 

@@ -44,11 +44,9 @@ it, so a published release's membership is fixed. That catches what the per-file
 check cannot: adding a schema to an already-published release leaves every
 existing file untouched, so only the release index notices.
 
-The root index is the deliberate exception. It is the full cross-product because
-it serves two jobs a per-level index cannot — it is the mirror and audit surface,
-and it is the document the build re-reads to confirm nothing published went
-missing. It therefore grows without bound; prefer a narrower index when you do
-not need all of it.
+The root index is the deliberate exception: it is the full cross-product, so
+that mirroring or auditing the whole site is one fetch rather than a crawl. It
+grows without bound, so prefer a narrower index when you do not need all of it.
 
 ## Status
 
@@ -145,14 +143,26 @@ pushes the result back. Both copies exclude `.git`: the published tree is a
 worktree whose `.git` is a file, and a `--delete` sync without that exclusion
 detaches the checkout mid-run.
 
-Two independent checks protect published bytes. Writing a canonical resource
-compares against what is already on disk and aborts on any difference. Then,
-after the tree is built, every entry in the *previous* catalog is re-read and
-re-hashed: a release that went missing or changed fails the build, whether or
-not the current lockfile still names it.
+Three checks protect published bytes, and they fail on different things.
 
-The purge that clears stale aliases walks a compat line file by file and never
-recurses, so no code path in the publisher can remove a release directory.
+1. **Per-file, while writing.** Writing a canonical resource compares against
+   what is already on disk and aborts on any difference. This only sees
+   resources the build is rewriting, and only catches modification — an
+   *added* file has nothing to compare against.
+2. **Tree against itself.** Every file inside a release directory is digested
+   before the build starts and re-checked afterwards. This is the primary
+   guard: it needs no record to be correct, and it covers release indexes as
+   well as schemas. It can only see damage *this build* caused.
+3. **Record against bytes.** Every entry in the previous catalog is re-read and
+   re-hashed. This is what the snapshot cannot do: catch damage that predates
+   the build — an out-of-band deletion, a bad merge, a partial push — which
+   would otherwise be adopted as the new baseline while the catalog kept
+   advertising a URL that 404s.
+
+Structurally, the purge that clears stale aliases walks a compat line file by
+file and never recurses, so no code path in the publisher can remove a release
+directory. Check 2 exists because that is an argument about the code as written,
+not a property the code enforces about itself.
 
 ## Lockfile completeness
 

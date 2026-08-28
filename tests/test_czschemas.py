@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import shutil
 import json
 import sys
 import tarfile
@@ -419,6 +420,48 @@ class BuildSiteTests(unittest.TestCase):
             on_download=file_download,
         )
         self.assertFalse((site / "CNAME").exists())
+
+    def test_snapshot_audit_catches_a_build_that_deletes_a_release(self):
+        """Defence in depth: if purge ever recursed, the snapshot would catch it."""
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        original = czschemas.purge_mutable_paths
+
+        def destructive(site_path, projects):
+            for project in projects:
+                shutil.rmtree(site_path / project / "v1" / "1.4.2", ignore_errors=True)
+            original(site_path, projects)
+
+        czschemas.purge_mutable_paths = destructive
+        try:
+            # 1.4.2 is no longer locked, so nothing rewrites what purge destroyed.
+            with self.assertRaisesRegex(czschemas.ImmutabilityError, "was removed"):
+                czschemas.build_site(
+                    BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download
+                )
+        finally:
+            czschemas.purge_mutable_paths = original
+
+    def test_snapshot_audit_covers_release_indexes_the_catalog_does_not(self):
+        site = self.root / "site"
+        czschemas.build_site(BASE_URL, [locked_artifact(self.root, "1.4.2")], site, on_download=file_download)
+        catalog = json.loads((site / "index.json").read_text())["schemas"]
+        self.assertNotIn("index.json", [record["schema"] for record in catalog])
+        original = czschemas.purge_mutable_paths
+
+        def destructive(site_path, projects):
+            for project in projects:
+                (site_path / project / "v1" / "1.4.2" / "index.json").unlink(missing_ok=True)
+            original(site_path, projects)
+
+        czschemas.purge_mutable_paths = destructive
+        try:
+            with self.assertRaisesRegex(czschemas.ImmutabilityError, r"1\.4\.2/index\.json"):
+                czschemas.build_site(
+                    BASE_URL, [locked_artifact(self.root, "1.5.0")], site, on_download=file_download
+                )
+        finally:
+            czschemas.purge_mutable_paths = original
 
     def test_extract_rejects_path_traversal(self):
         payload = BytesIO()
