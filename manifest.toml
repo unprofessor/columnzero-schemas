@@ -1,0 +1,6 @@
+[site]
+base_url = "https://schemas.columnzero.com"
+
+# Add one [[project]] block only after its release workflow publishes the
+# required schemas.tar.gz artifact and index.json contract. There are no schema
+# artifacts yet, so this manifest intentionally contains no projects.

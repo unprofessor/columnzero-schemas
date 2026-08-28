@@ -1,0 +1,59 @@
+name: Publish schemas
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install and test publisher
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -m unittest discover -s tests -v
+
+      - name: Check out published tree or create it
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages; then
+            git fetch origin gh-pages
+            git worktree add ../published FETCH_HEAD
+          else
+            git worktree add --detach ../published
+            git -C ../published switch --orphan gh-pages
+            git -C ../published clean -fdx
+          fi
+
+      - name: Build immutable publication tree
+        run: |
+          mkdir -p site
+          if [ -d ../published ]; then
+            rsync -a --exclude=.git ../published/ site/
+          fi
+          python src/czschemas.py build --site site
+
+      - name: Publish changed aliases, indexes, and new releases
+        run: |
+          rsync -a --delete site/ ../published/
+          git -C ../published add -A
+          if git -C ../published diff --cached --quiet; then
+            echo "No publication changes."
+            exit 0
+          fi
+          git -C ../published config user.name "github-actions[bot]"
+          git -C ../published config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C ../published commit -m "Publish locked schemas"
+          git -C ../published push origin gh-pages
