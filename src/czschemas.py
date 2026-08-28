@@ -42,6 +42,10 @@ COMPAT_LINE = re.compile(r"^(?:[1-9]\d*|0\.(?:0|[1-9]\d*))$")
 SCHEMA_SUFFIX = ".schema.json"
 # {project}/v{compat}/{version}/... - everything below a release directory is canonical.
 CANONICAL_PATH = re.compile(r"^[^/]+/v[^/]+/[^/]+/")
+# The only git statuses that leave every published byte where it was: a file that did
+# not exist before (A), and a copy, whose source survives untouched (C).  Everything
+# else is a violation, including letters git has yet to invent.
+ADDITIVE_STATUSES = frozenset("AC")
 GITHUB_DOWNLOAD_HOSTS = {
     "github.com",
     "objects.githubusercontent.com",
@@ -425,13 +429,16 @@ def read_json_object(path: Path) -> dict[str, Any]:
 
 
 def changed_canonical_paths(name_status: str) -> list[str]:
-    """Canonical paths a `git diff --name-status` reports as modified, deleted, or renamed.
+    """Canonical paths that a `git diff --name-status` reports as anything but additive.
 
     Immutability is enforced against git rather than against anything inside the tree.
     A record kept in the tree can be edited by whoever edits the tree - drop the field
     an index is checked on and the check disappears with it - whereas the previous
-    commit is not reachable from the working copy.  Additions are not violations:
-    publishing a new release is the point.
+    commit is not reachable from the working copy.
+
+    The rule is an allowlist. Naming the bad statuses instead would mean the check is
+    only as complete as that list: `T`, a regular file swapped for a symlink, was
+    missing from exactly such a list, and it leaves the release index byte-identical.
     """
     violations: list[str] = []
     for line in name_status.splitlines():
@@ -439,8 +446,9 @@ def changed_canonical_paths(name_status: str) -> list[str]:
         if len(fields) < 2:
             continue
         kind = fields[0][:1]
-        # For a rename the source path comes first, and it is the one that disappears.
-        if kind in {"D", "M", "R"} and CANONICAL_PATH.match(fields[1]):
+        # Renames and copies list the source first, and for a rename it is the path
+        # that disappears; for everything else there is only one path.
+        if kind not in ADDITIVE_STATUSES and CANONICAL_PATH.match(fields[1]):
             violations.append(f"{kind} {fields[1]}")
     return violations
 

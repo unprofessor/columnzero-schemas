@@ -511,10 +511,29 @@ class ChangedCanonicalPathsTests(unittest.TestCase):
         ):
             self.assertEqual(self.check(status), expected, status)
 
+    def test_a_typechange_is_a_violation(self):
+        """A schema swapped for a symlink leaves the release index byte-identical."""
+        self.assertEqual(
+            self.check("T\tplanr/v1/1.4.2/planr.schema.json"),
+            ["T planr/v1/1.4.2/planr.schema.json"],
+        )
+
+    def test_the_rule_is_an_allowlist_not_a_list_of_known_bad_statuses(self):
+        for kind in ("T", "U", "X", "B", "Z"):
+            self.assertEqual(
+                self.check(f"{kind}\tplanr/v1/1.4.2/planr.schema.json"),
+                [f"{kind} planr/v1/1.4.2/planr.schema.json"],
+                kind,
+            )
+
     def test_additions_are_not_violations(self):
         """Publishing a new release is the point."""
         self.assertEqual(self.check("A\tplanr/v1/1.5.0/planr.schema.json"), [])
         self.assertEqual(self.check("A\tplanr/v2/2.0.0/index.json"), [])
+        # A copy leaves its source untouched.
+        self.assertEqual(
+            self.check("C100\tplanr/v1/1.4.2/a.schema.json\tplanr/v1/1.4.2/b.schema.json"), []
+        )
 
     def test_mutable_resources_may_change_freely(self):
         for status in (
