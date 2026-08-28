@@ -47,7 +47,9 @@ jobs:
 
       - name: Publish changed aliases, indexes, and new releases
         run: |
-          rsync -a --delete site/ ../published/
+          # --exclude=.git is load-bearing: ../published is a worktree whose .git is a
+          # file, and --delete would otherwise remove it and detach the checkout.
+          rsync -a --delete --exclude=.git site/ ../published/
           git -C ../published add -A
           if git -C ../published diff --cached --quiet; then
             echo "No publication changes."
