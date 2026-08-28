@@ -1,11 +1,11 @@
 [site]
 base_url = "https://schemas.columnzero.com"
 
-# Write a CNAME so Pages serves base_url. Leave this false until DNS for that
-# host resolves: publishing a CNAME switches Pages to the custom domain and
-# takes the default *.github.io URL down with it, so a premature CNAME leaves
-# nothing reachable to test against.
-custom_domain = false
+# Write a CNAME so Pages serves base_url. DNS for that host resolves and the
+# custom domain is live, so this is on. Setting it false deletes the CNAME and
+# tears the custom domain down, so it stays true while schemas.columnzero.com
+# is the canonical host.
+custom_domain = true
 
 # Add one [[project]] block per upstream once its release workflow publishes a
 # schemas.tar.gz meeting the index.json contract. Only this repository's own

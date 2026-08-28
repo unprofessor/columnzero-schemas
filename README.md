@@ -38,14 +38,13 @@ locked artifact:
 No other project has shipped a `schemas.tar.gz` yet, so `manifest.toml` still
 carries only the site configuration.
 
-The `gh-pages` branch exists and carries this tree. The custom domain is not in
-use: `schemas.columnzero.com` has no DNS record, so `site.custom_domain` is
-`false` and no `CNAME` is published. Pages therefore serves the default
-`*.github.io` URL, which is testable today.
+The `gh-pages` branch carries this tree, and Pages serves it at
+`schemas.columnzero.com` — a DNS `CNAME` to `unprofessor.github.io`.
 
-Turning `custom_domain` on publishes a `CNAME`, which switches Pages to the
-custom domain and takes the default URL down with it. Do that only once DNS
-resolves. Turning it back off removes the file again.
+`site.custom_domain` is `true`, so the publisher writes the `CNAME` file and
+preserves it across rebuilds. Setting it back to `false` **deletes** that file,
+which returns Pages to the default URL and takes the canonical host down with
+it. It stays true for as long as `base_url` is where these schemas live.
 
 ## Upstream artifact contract
 
