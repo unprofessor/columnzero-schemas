@@ -28,9 +28,20 @@ existing canonical resource.
 
 ## Status
 
-The repository is scaffolded, but no upstream project has shipped a schema
-artifact yet. `manifest.toml` and `manifest.lock` are therefore intentionally
-empty apart from the site configuration.
+`columnzero-schemas` publishes its own contract schema as the first and only
+locked artifact:
+
+```text
+/columnzero-schemas/v1/1.0.0/schema-index.schema.json
+```
+
+No other project has shipped a `schemas.tar.gz` yet, so `manifest.toml` still
+carries only the site configuration.
+
+The site is not reachable yet. `schemas.columnzero.com` has no DNS record; it
+needs a `CNAME` pointing at `unprofessor.github.io`, and GitHub Pages must be
+enabled on the `gh-pages` branch. Until both are done the publisher still builds
+and commits correctly, but nothing resolves.
 
 ## Upstream artifact contract
 
@@ -94,8 +105,10 @@ python -m venv .venv
 .venv/bin/python src/czschemas.py build
 ```
 
-The empty initial lockfile produces only `site/index.json` and `site/CNAME`.
-Publishing begins only after a locked artifact has been added.
+`build` downloads every artifact named in `manifest.lock` from its GitHub
+release, verifies the recorded SHA-256, and writes the publication tree to
+`site/` (git-ignored). It is safe to run repeatedly: a rebuild republishes
+nothing and re-audits what is already there.
 
 ## Deployment invariant
 
