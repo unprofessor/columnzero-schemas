@@ -2,8 +2,8 @@
 """Pack this repository's own schemas into a deterministic release artifact.
 
 Upstream projects need a reference implementation of the artifact contract; this is
-it, and it is also the publisher's self-test.  The archive is byte-reproducible so the
-SHA-256 recorded in manifest.lock is stable across machines and rebuilds.
+it, and it is also the registry's self-test.  The archive is byte-reproducible so the
+SHA-256 recorded in the artifact's lock is stable across machines and rebuilds.
 """
 
 from __future__ import annotations

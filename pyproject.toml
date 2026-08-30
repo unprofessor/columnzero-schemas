@@ -1,9 +1,26 @@
 [project]
 name = "columnzero-schemas"
-version = "0.1.0"
-description = "Immutable JSON Schema publisher for schemas.columnzero.com"
+version = "0.2.0"
+description = "Append-only schema registry for schemas.columnzero.com"
 requires-python = ">=3.11"
-dependencies = ["jsonschema>=4.23,<5"]
+dependencies = []
+
+# The publisher itself is pure standard library. `jsonschema` is needed only by the
+# JSON Schema admission linter, which runs as a separate process and is one of several
+# possible linters, so it is not a dependency of the registry.
+[project.optional-dependencies]
+lint = ["jsonschema>=4.23,<5"]
+
+[project.scripts]
+czschemas = "czschemas.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["czschemas"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

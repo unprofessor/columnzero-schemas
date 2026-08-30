@@ -1,9 +1,9 @@
 """The publisher's self-test: this repository publishes its own artifact contract.
 
 `selftest/schema-index.schema.json` describes the root `index.json` that every upstream
-artifact must carry, so the artifact we build from it is the one artifact whose index
-can be validated against its own payload.  These tests keep the source schema, the
-reproducible archive, and the SHA-256 recorded in `manifest.lock` in agreement.
+artifact must carry, so the artifact built from it is the one artifact whose index can
+be validated against its own payload.  These tests keep the source schema, the
+reproducible archive, and the digest recorded in the manifest tree in agreement.
 """
 
 import hashlib
@@ -17,6 +17,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from czschemas import reconcile, registry                    # noqa: E402
+from czschemas.config import Config                          # noqa: E402
+from czschemas.model import ArtifactLock, ReleaseKey, Version  # noqa: E402
 
 
 def _load(name: str, path: Path):
@@ -27,10 +32,10 @@ def _load(name: str, path: Path):
     return module
 
 
-czschemas = _load("czschemas", ROOT / "src" / "czschemas.py")
 pack = _load("selftest_pack", ROOT / "selftest" / "pack.py")
-
 BASE_URL = "https://schemas.columnzero.com"
+KEY = ReleaseKey(pack.PROJECT, Version.parse(pack.RELEASE))
+LOCK_PATH = ROOT / reconcile.MANIFEST_ROOT / KEY.path / registry.LOCK_NAME
 
 
 def build_payload() -> bytes:
@@ -55,45 +60,50 @@ class SelfTestArtifactTests(unittest.TestCase):
         self.assertEqual(build_payload(), self.payload)
 
     def test_index_validates_against_the_schema_it_ships(self):
+        try:
+            from jsonschema.validators import validator_for
+        except ImportError:
+            self.skipTest("jsonschema is not installed (pip install '.[lint]')")
         contract = json.loads(self.members["schema-index.schema.json"])
-        validator = czschemas.validator_for(contract)
+        validator = validator_for(contract)
         validator.check_schema(contract)
         validator(contract).validate(json.loads(self.members["index.json"]))
 
-    def test_locked_sha256_matches_the_source_tree(self):
+    def test_the_declared_digest_matches_the_source_tree(self):
         """A changed schema must force a new release, not a silent republish."""
-        locked = [
-            artifact
-            for artifact in czschemas.read_lock(ROOT / "manifest.lock")
-            if artifact.project == pack.PROJECT
-        ]
-        if not locked:
-            self.skipTest("self-test artifact is not in manifest.lock yet")
-        self.assertEqual(len(locked), 1)
-        self.assertEqual(locked[0].version, pack.RELEASE)
-        self.assertEqual(locked[0].sha256, hashlib.sha256(self.payload).hexdigest())
+        if not LOCK_PATH.is_file():
+            self.skipTest("the self-test artifact is not declared yet")
+        lock = ArtifactLock.parse(LOCK_PATH.read_bytes(), str(LOCK_PATH))
+        self.assertEqual(lock.sha256, hashlib.sha256(self.payload).hexdigest())
 
-    def test_artifact_publishes_to_its_canonical_url(self):
-        artifact = czschemas.LockedArtifact(
-            project=pack.PROJECT,
-            tag=f"schemas-v{pack.RELEASE}",
-            version=pack.RELEASE,
-            url=f"https://github.com/unprofessor/columnzero-schemas/releases/download/schemas-v{pack.RELEASE}/schemas.tar.gz",
-            sha256=hashlib.sha256(self.payload).hexdigest(),
-        )
+    def test_the_lock_lives_at_the_path_that_names_its_release(self):
+        if not LOCK_PATH.is_file():
+            self.skipTest("the self-test artifact is not declared yet")
+        relative = LOCK_PATH.relative_to(ROOT / reconcile.MANIFEST_ROOT).parent.as_posix()
+        key = ReleaseKey.from_path(relative)
+        self.assertEqual(key.project, pack.PROJECT)
+        self.assertEqual(str(key.version), pack.RELEASE)
+        self.assertEqual(str(key.compat), pack.COMPAT)
+
+    def test_the_artifact_reconciles_into_its_canonical_url(self):
+        config = Config(BASE_URL, custom_domain=False, linters={})
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory) / "site"
-            result = czschemas.build_site(BASE_URL, [artifact], site, on_download=lambda a: self.payload)
-            self.assertEqual(result, {"published": 1, "aliases": 2})
-            published = site / f"{pack.PROJECT}/v{pack.COMPAT}/{pack.RELEASE}/schema-index.schema.json"
-            self.assertEqual(
-                json.loads(published.read_text())["$id"],
-                f"{BASE_URL}/{pack.PROJECT}/v{pack.COMPAT}/{pack.RELEASE}/schema-index.schema.json",
+            result = reconcile.apply(
+                ROOT, site, config, on_download=lambda lock: self.payload
             )
-            # Rebuilding the same lockfile republishes nothing and passes the audit.
+            self.assertEqual(result["admitted"], 1)
+            self.assertEqual(result["published"], 1)
+            published = site / KEY.path / "schema-index.schema.json"
             self.assertEqual(
-                czschemas.build_site(BASE_URL, [artifact], site, on_download=lambda a: self.payload),
-                {"published": 0, "aliases": 2},
+                json.loads(published.read_text())["$id"], KEY.url(BASE_URL, published.name)
+            )
+
+            def refuse(lock):
+                raise AssertionError("steady state fetched an artifact")
+
+            self.assertEqual(
+                reconcile.apply(ROOT, site, config, on_download=refuse)["admitted"], 0
             )
 
 
