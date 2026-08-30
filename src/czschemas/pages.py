@@ -54,10 +54,19 @@ footer { margin-top:3.5rem; padding-top:1rem; border-top:1px solid var(--line);
 """
 
 
-def _document(title: str, crumbs: list[tuple[str, str | None]], body: str) -> bytes:
+def _document(title: str, directory: tuple[str, ...], body: str) -> bytes:
+    """Render one page, given the directory it will be written to.
+
+    The breadcrumb trail *is* that directory, so both the labels and the number of `../`
+    steps are derived from it rather than restated beside it.  A page written one level
+    deeper cannot link one level short: the value that decides where the file goes is the
+    value that decides how far back its links reach.
+    """
+    depth = len(directory)
     trail = " / ".join(
-        f'<a href="{html.escape(href)}">{html.escape(label)}</a>' if href else html.escape(label)
-        for label, href in crumbs
+        html.escape(label) if step == depth
+        else f'<a href="{"../" * (depth - step)}">{html.escape(label)}</a>'
+        for step, label in enumerate(("schemas",) + directory)
     )
     return (
         "<!doctype html>\n"
@@ -118,16 +127,16 @@ def write_all(
 
     written = 0
 
-    def emit(path: Path, body: bytes) -> None:
+    def emit(directory: tuple[str, ...], title: str, body: str) -> None:
+        """Write one page.  Its location and its links come from the same tuple."""
         nonlocal written
+        path = site.joinpath(*directory) / PAGE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(body)
+        path.write_bytes(_document(title, directory, body))
         written += 1
 
     # Root: the projects, and the one fetch that mirrors everything.
-    emit(site / PAGE_NAME, _document(
-        "Schema registry",
-        [("schemas", None)],
+    emit((), "Schema registry",
         "<h1>Schema registry</h1>\n"
         '<p class="lede">Immutable, digest-pinned JSON Schema releases.</p>\n'
         "<h2>Projects</h2>\n"
@@ -141,7 +150,7 @@ def write_all(
         f'<a href="catalog.json">catalog.json</a></div>'
         '<div class="meta">Every published schema, one flat entry each.</div>'
         f'<code class="u">{html.escape(root)}/catalog.json</code></li></ul>',
-    ))
+    )
 
     for project in projects:
         has_latest = any(bucket[0] == project for bucket in by_project)
@@ -160,26 +169,22 @@ def write_all(
                 f"{count} release{'' if count == 1 else 's'}",
                 f"{root}/{project}/{line.segment}/",
             ))
-        emit(site / project / PAGE_NAME, _document(
-            project,
-            [("schemas", "../"), (project, None)],
+        emit((project,), project,
             f"<h1>{html.escape(project)}</h1>\n"
             '<p class="lede">Pick a compatibility line. Within a line, schemas stay '
             "backward compatible; across lines they need not.</p>\n"
             "<h2>Lines</h2>\n" + _list(entries),
-        ))
+        )
 
         if has_latest:
             members = [alias for bucket, alias in by_project.items() if bucket[0] == project]
-            emit(site / project / "latest" / PAGE_NAME, _document(
-                f"{project} latest",
-                [("schemas", "../../"), (project, "../"), ("latest", None)],
+            emit((project, "latest"), f"{project} latest",
                 f"<h1>{html.escape(project)} <span class=\"meta\">latest</span></h1>\n"
                 '<p class="lede">These URLs follow the newest stable release, including '
                 "across a breaking-change boundary. Pin a version instead if that matters."
                 "</p>\n<h2>Schemas</h2>\n"
                 + _list(_alias_entries(members, f"{root}/{project}/latest")),
-            ))
+            )
 
         for line in ordered:
             segment = line.segment
@@ -198,18 +203,21 @@ def write_all(
                     for schema in sorted(release.schemas, key=lambda s: s.name)
                 )
                 tag = " &middot; prerelease" if version.is_prerelease else ""
+                # A release admitted before locks existed has no `artifact.lock` on
+                # disk, so linking one unconditionally would point at a 404.
+                records = [f'<a href="{html.escape(str(version))}/index.json">index.json</a>']
+                if release.lock is not None:
+                    records.append(
+                        f'<a href="{html.escape(str(version))}/artifact.lock">artifact.lock</a>'
+                    )
                 release_entries.append(
                     "<li>"
                     f'<div class="name">{html.escape(str(version))}{tag}</div>'
                     f'<div class="meta">{files or "no schemas"}</div>'
-                    f'<div class="meta"><a href="{html.escape(str(version))}/index.json">'
-                    "index.json</a> &middot; "
-                    f'<a href="{html.escape(str(version))}/artifact.lock">artifact.lock</a>'
-                    "</div></li>"
+                    f'<div class="meta">{" &middot; ".join(records)}</div>'
+                    "</li>"
                 )
-            emit(site / project / segment / PAGE_NAME, _document(
-                f"{project} {segment}",
-                [("schemas", "../../"), (project, "../"), (segment, None)],
+            emit((project, segment), f"{project} {segment}",
                 f"<h1>{html.escape(project)} <span class=\"meta\">{html.escape(segment)}</span>"
                 "</h1>\n"
                 '<p class="lede">Reference the line URL to track compatible updates, or a '
@@ -218,5 +226,5 @@ def write_all(
                 + _list(_alias_entries(members, f"{root}/{project}/{segment}"))
                 + "\n<h2>Releases</h2>\n"
                 + _list(release_entries),
-            ))
+            )
     return written

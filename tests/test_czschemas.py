@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import sys
 import tarfile
 import tempfile
@@ -596,6 +597,42 @@ class PageTests(TempCase):
         before = digest()
         self.registry.apply()
         self.assertEqual(before, digest())
+
+    def _broken_links(self) -> list[str]:
+        """Every relative href in the tree, resolved against the page that carries it."""
+        site = self.registry.site
+        broken = []
+        for page in sorted(site.rglob(pages.PAGE_NAME)):
+            for href in re.findall(r'href="([^"]+)"', page.read_text()):
+                if href.startswith(("http:", "https:", "#")):
+                    continue
+                target = (page.parent / href).resolve()
+                if not (target.is_file() or (target / pages.PAGE_NAME).is_file()):
+                    broken.append(f"{page.relative_to(site)} -> {href}")
+        return broken
+
+    def test_every_relative_link_resolves(self):
+        """Breadcrumb depth is derived from where a page is written, so it cannot
+        disagree with it -- but a downward link can still name something that is not
+        there, which is what this catches."""
+        self.registry.publish(key("1.4.2"))
+        self.registry.publish(key("1.5.0"), ("planr.schema.json", "epic.schema.json"))
+        self.registry.publish(key("2.0.0"))
+        self.registry.publish(key("2.1.0-rc.1"))
+        self.registry.apply()
+        self.assertEqual(self._broken_links(), [])
+
+    def test_a_release_with_no_lock_does_not_link_one(self):
+        """A release admitted before locks existed has no `artifact.lock` on disk.  The
+        page has to notice, or it advertises a 404."""
+        self.registry.publish(key("1.4.2"))
+        self.registry.apply()
+        (self.registry.site / key("1.4.2").path / registry.LOCK_NAME).unlink()
+        published = registry.read_published(self.registry.site)
+        self.assertIsNone(published[key("1.4.2")].lock)
+        registry.rebuild_derived(self.registry.site, BASE_URL, published, False)
+        self.assertNotIn("artifact.lock", self.page("planr/v1/index.html"))
+        self.assertEqual(self._broken_links(), [])
 
     def test_a_project_name_is_escaped_rather_than_interpolated(self):
         """Project names are already constrained to a safe segment, so this is a second
