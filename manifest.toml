@@ -7,6 +7,12 @@ base_url = "https://schemas.columnzero.com"
 # is the canonical host.
 custom_domain = true
 
-# Add one [[project]] block per upstream once its release workflow publishes a
-# schemas.tar.gz meeting the index.json contract. Only this repository's own
-# contract schema ships so far, and it is recorded in manifest.lock.
+# Admission linters, chosen by published file suffix and run as
+# `<argv...> <file> <canonical-url>`; exit 0 accepts. They run once, on the artifact
+# being admitted, and never again -- a rule added here does not re-apply to bytes that
+# are already published and can no longer be changed.
+#
+# A suffix with no linter publishes unchecked. That is the registry working as intended;
+# `plan` reports it as `unlinted` rather than implying a pass.
+[lint]
+".schema.json" = ["python3", "lint/jsonschema_lint.py"]
