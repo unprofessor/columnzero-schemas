@@ -604,7 +604,9 @@ class PageTests(TempCase):
         broken = []
         for page in sorted(site.rglob(pages.PAGE_NAME)):
             for href in re.findall(r'href="([^"]+)"', page.read_text()):
-                if href.startswith(("http:", "https:", "#")):
+                # Anything carrying a scheme -- `data:` for the favicon, `https:` for an
+                # off-site link -- is not this tree's to resolve.
+                if href.startswith("#") or re.match(r"[a-z][a-z0-9+.-]*:", href):
                     continue
                 target = (page.parent / href).resolve()
                 if not (target.is_file() or (target / pages.PAGE_NAME).is_file()):
@@ -633,6 +635,21 @@ class PageTests(TempCase):
         registry.rebuild_derived(self.registry.site, BASE_URL, published, False)
         self.assertNotIn("artifact.lock", self.page("planr/v1/index.html"))
         self.assertEqual(self._broken_links(), [])
+
+    def test_a_page_fetches_nothing(self):
+        """The stylesheet and the favicon are inlined so a page stands alone.  Any
+        external reference would be a resource that can 404 on its own, independently of
+        the tree the registry actually controls."""
+        self.registry.publish(key("1.4.2"))
+        self.registry.apply()
+        for page in sorted(self.registry.site.rglob(pages.PAGE_NAME)):
+            text = page.read_text()
+            self.assertIn('rel="icon"', text)
+            for ref in re.findall(r'(?:href|src)="([^"]+)"', text):
+                self.assertFalse(
+                    ref.startswith(("http://", "https://", "//")),
+                    f"{page.name} reaches off-site for {ref}",
+                )
 
     def test_a_project_name_is_escaped_rather_than_interpolated(self):
         """Project names are already constrained to a safe segment, so this is a second

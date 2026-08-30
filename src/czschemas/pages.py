@@ -14,6 +14,7 @@ reachable from the line page instead, which links each version's schemas directl
 from __future__ import annotations
 
 import html
+import urllib.parse
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -54,6 +55,27 @@ footer { margin-top:3.5rem; padding-top:1rem; border-top:1px solid var(--line);
 """
 
 
+# Two braces: the site serves JSON Schema, and at 16px an open outline survives scaling
+# where a filled glyph turns to mush.  Inlined as a data URI for the reason the stylesheet
+# is inlined -- a file at the site root would be a fourth kind of resource in the tree,
+# with its own purge rule and its own way to 404.  The blue sits between the light and
+# dark accents so one colour reads on either tab bar, no media query needed.
+FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+    "<g fill='none' stroke='#4380ff' stroke-width='1.6'"
+    " stroke-linecap='round' stroke-linejoin='round'>"
+    # The tips are held 3.6 units apart on purpose.  Drawn closer, the two braces close
+    # into an oval the moment the icon is rasterised at 16px -- which is the only size
+    # that matters.  Checked at 16, not just in the large render.
+    "<path d='M6.2 2.8C5 2.8 5 4.4 5 6.2 5 7.2 4 8 2.8 8 4 8 5 8.8 5 9.8 5 11.6 5 13.2"
+    " 6.2 13.2'/>"
+    "<path d='M9.8 2.8C11 2.8 11 4.4 11 6.2 11 7.2 12 8 13.2 8 12 8 11 8.8 11 9.8 11 11.6"
+    " 11 13.2 9.8 13.2'/>"
+    "</g></svg>"
+)
+FAVICON = "data:image/svg+xml," + urllib.parse.quote(FAVICON_SVG, safe="")
+
+
 def _document(title: str, directory: tuple[str, ...], body: str) -> bytes:
     """Render one page, given the directory it will be written to.
 
@@ -72,6 +94,7 @@ def _document(title: str, directory: tuple[str, ...], body: str) -> bytes:
         "<!doctype html>\n"
         '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f'<link rel="icon" href="{FAVICON}">\n'
         f"<title>{html.escape(title)}</title>\n<style>{STYLE}</style>\n</head>\n<body>\n"
         f"<nav>{trail}</nav>\n{body}\n"
         "<footer>Immutable schema registry. Canonical URLs never change or disappear; "

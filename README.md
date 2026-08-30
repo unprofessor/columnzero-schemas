@@ -202,6 +202,10 @@ page is a second projection of the same releases rather than a rendering of the 
 the published JSON stays free to change shape without a page quietly depending on it, and
 a tampered page changes nothing but itself until the next run.
 
+A page reaches off-site for nothing. The stylesheet and the favicon are both inlined,
+because an asset at a shared path would be one more derived resource to purge and one
+more thing that can 404 on its own.
+
 **No page is written inside a release directory.** Everything below one is canonical and
 append-only, so a page written there would be frozen at whatever markup shipped first and
 the next restyle would fail the build rather than reach it. A release directory therefore
