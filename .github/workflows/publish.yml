@@ -1,12 +1,29 @@
 name: Publish schemas
 
+# Publishing is merge-triggered: a lock lands in the manifest tree and the release it
+# names is reconciled onto gh-pages.  The schedule is an audit rather than a publish
+# clock -- in steady state it fetches nothing, regenerates the derived resources over
+# what is already there, and fails if the two trees have diverged.
 on:
+  push:
+    branches: [main]
+    paths:
+      - "manifest/**"
+      - "manifest.toml"
+      - "src/**"
+      - "lint/**"
   workflow_dispatch:
   schedule:
     - cron: "17 4 * * *"
 
 permissions:
   contents: write
+
+# Two runs reconciling at once would each snapshot a gh-pages that the other is about to
+# change, and the loser would rebuild the derived resources without the winner's release.
+concurrency:
+  group: publish-gh-pages
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -20,10 +37,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install and test publisher
+      - name: Install and test
         run: |
           python -m pip install --upgrade pip
-          python -m pip install .
+          # The registry is pure standard library; the extra is the JSON Schema linter,
+          # which runs as a separate process at admission time.
+          python -m pip install '.[lint]'
           python -m unittest discover -s tests -v
 
       - name: Check out published tree or create it
@@ -37,13 +56,11 @@ jobs:
             git -C ../published clean -fdx
           fi
 
-      - name: Build immutable publication tree
+      - name: Reconcile
         run: |
           mkdir -p site
-          if [ -d ../published ]; then
-            rsync -a --exclude=.git ../published/ site/
-          fi
-          python src/czschemas.py build --site site
+          rsync -a --exclude=.git ../published/ site/
+          python -m czschemas apply --site site
 
       - name: Refuse to change a published resource
         run: |
@@ -54,7 +71,7 @@ jobs:
           # git holds the only record of the published tree that the published tree
           # cannot edit, so immutability is enforced here rather than inside the build.
           git -C ../published diff --cached --name-status \
-            | python src/czschemas.py verify
+            | python -m czschemas verify --tree site
 
       - name: Publish changed aliases, indexes, and new releases
         run: |
@@ -64,5 +81,5 @@ jobs:
           fi
           git -C ../published config user.name "github-actions[bot]"
           git -C ../published config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C ../published commit -m "Publish locked schemas"
+          git -C ../published commit -m "Publish reconciled schemas"
           git -C ../published push origin HEAD:refs/heads/gh-pages
