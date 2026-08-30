@@ -9,6 +9,7 @@ Components:
     fetch       the only component that touches the network or opens an archive
     lint        pluggable admission checks, external and per-format
     registry    the publication tree and the derived resources around it
+    pages       the browsable HTML projection of the publication tree
     reconcile   the manifest tree vs. the publication tree; the difference is the queue
     gate        the immutability verdict, taken against git rather than the tree
 """

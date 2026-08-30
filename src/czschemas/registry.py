@@ -20,6 +20,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from . import pages
 from .model import (
     CompatLine,
     ImmutabilityError,
@@ -214,8 +215,8 @@ def alias_record(key: ReleaseKey, schema: PublishedSchema, base_url: str) -> dic
 def purge_mutable(site: Path, projects: set[str]) -> None:
     """Remove regenerated resources so a rebuild cannot leave a stale alias behind.
 
-    Mutable resources are the files directly inside a project or compat-line directory;
-    canonical releases live one level deeper.  This walks a line file by file and never
+    Mutable resources are the files directly inside a project or compat-line directory --
+    every index, every alias, and every HTML page; canonical releases live one level deeper.  This walks a line file by file and never
     recurses, so no code path here can remove a release directory.
     """
     for project in sorted(projects):
@@ -223,9 +224,10 @@ def purge_mutable(site: Path, projects: set[str]) -> None:
         latest = project_root / "latest"
         if latest.is_dir():
             shutil.rmtree(latest)
-        index = project_root / INDEX_NAME
-        if index.exists():
-            index.unlink()
+        for name in (INDEX_NAME, pages.PAGE_NAME):
+            derived = project_root / name
+            if derived.exists():
+                derived.unlink()
         for line in sorted(project_root.glob("v*")):
             if not line.is_dir():
                 continue
@@ -348,6 +350,11 @@ def rebuild_derived(
         "catalog": f"{root}/{CATALOG_NAME}",
         "projects": sorted(projects),
     })
+
+    # The browsable projection of the same releases.  Written last so a page can never be
+    # mistaken for an input to anything above it, and confined to the mutable region --
+    # see `pages` for why nothing is written inside a release directory.
+    pages.write_all(site, root, releases, by_line, by_project)
 
     hostname = urllib.parse.urlparse(base_url).hostname
     if hostname is None:

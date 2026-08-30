@@ -37,8 +37,8 @@ the registry catches for free.
 correspond exactly:
 
 ```text
-main:manifest/{project}/v{compat}/{version}/artifact.lock
-gh-pages:        {project}/v{compat}/{version}/artifact.lock
+main:     manifest/{project}/v{compat}/{version}/artifact.lock
+gh-pages:          {project}/v{compat}/{version}/artifact.lock
 ```
 
 The difference between the two trees *is* the work queue, so there is no central ledger
@@ -183,6 +183,31 @@ it is what to use for mirroring or auditing.
 It is **derived output**. Nothing in the build reads it back; it is regenerated whole
 from the tree on every run, so a stale, corrupt, or tampered catalog cannot affect a
 build. It gains an entry with every release and never loses one.
+
+## Browsing
+
+Every directory that is not a release carries an `index.html`, so the tree is walkable in
+a browser as well as by fetch:
+
+| Path | Page |
+| --- | --- |
+| `/` | projects, and the catalog |
+| `/{project}/` | compat lines, and `latest/` when one exists |
+| `/{project}/v{compat}/` | the line's alias URLs, and every release with its schemas |
+| `/{project}/latest/` | the schemas `latest/` currently serves |
+
+The pages are **derived output** on the same terms as the catalog: regenerated whole from
+the tree on every run and never read back. Nothing parses an `index.json` to build one. A
+page is a second projection of the same releases rather than a rendering of the first, so
+the published JSON stays free to change shape without a page quietly depending on it, and
+a tampered page changes nothing but itself until the next run.
+
+**No page is written inside a release directory.** Everything below one is canonical and
+append-only, so a page written there would be frozen at whatever markup shipped first and
+the next restyle would fail the build rather than reach it. A release directory therefore
+has no page and its directory URL 404s in a browser. It stays browsable from its line
+page, which links each version's schemas directly, alongside that release's `index.json`
+and `artifact.lock`.
 
 ## Immutability
 

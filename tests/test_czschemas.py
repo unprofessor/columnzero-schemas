@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from czschemas import gate, lint, model, reconcile, registry          # noqa: E402
+from czschemas import gate, lint, model, pages, reconcile, registry   # noqa: E402
 from czschemas.config import Config                                   # noqa: E402
 from czschemas.model import (                                         # noqa: E402
     ArtifactLock,
@@ -504,6 +504,105 @@ class ImmutabilityTests(TempCase):
         self.assertEqual(
             [s["version"] for s in self.registry.read(registry.CATALOG_NAME)["schemas"]], ["1.4.2"]
         )
+
+
+class PageTests(TempCase):
+    """The HTML projection.  What matters is where pages are *not* written, and that
+    they are derived rather than read: a page is output, like the catalog."""
+
+    def page(self, relative: str) -> str:
+        return (self.registry.site / relative).read_text()
+
+    def test_no_page_is_written_inside_a_release_directory(self):
+        """The decisive constraint.  Everything below a release directory is canonical
+        and append-only, so a page written there could never be restyled -- and
+        `write_canonical` would fail the build on the attempt."""
+        self.registry.publish(key("1.4.2"))
+        self.registry.apply()
+        release_dir = self.registry.site / key("1.4.2").path
+        self.assertTrue((release_dir / registry.INDEX_NAME).is_file())
+        self.assertFalse((release_dir / pages.PAGE_NAME).exists())
+
+    def test_every_page_the_build_writes_is_outside_the_canonical_region(self):
+        """Asserted against the gate itself rather than against a path list, so the two
+        cannot drift apart."""
+        self.registry.publish(key("1.4.2"))
+        self.registry.publish(key("2.0.0"))
+        self.registry.apply()
+        written = sorted(
+            path.relative_to(self.registry.site).as_posix()
+            for path in self.registry.site.rglob(pages.PAGE_NAME)
+        )
+        self.assertTrue(written)
+        diff = "\n".join(f"M\t{path}" for path in written)
+        self.assertEqual(gate.violations(diff), [])
+
+    def test_a_page_is_rebuilt_when_an_alias_moves(self):
+        self.registry.publish(key("1.4.2"))
+        self.registry.apply()
+        self.assertIn("serving 1.4.2", self.page("planr/v1/index.html"))
+        self.registry.publish(key("1.5.0"))
+        self.registry.apply()
+        line = self.page("planr/v1/index.html")
+        self.assertIn("serving 1.5.0", line)
+        self.assertNotIn("serving 1.4.2", line)
+        self.assertIn("1.4.2/planr.schema.json", line)
+
+    def test_pages_are_output_only_and_cannot_poison_a_build(self):
+        """The same property the catalog has.  A page is never read back, so tampering
+        with one changes nothing but that page, and only until the next run."""
+        self.registry.publish(key("1.4.2"))
+        self.registry.apply()
+        (self.registry.site / "planr/v1/index.html").write_text("<h1>tampered</h1>")
+        self.registry.apply()
+        self.assertNotIn("tampered", self.page("planr/v1/index.html"))
+
+    def test_the_purge_clears_a_page_for_a_line_that_lost_its_alias(self):
+        self.registry.publish(key("1.4.2"))
+        self.registry.apply()
+        stale = self.registry.site / "planr/v1/gone.schema.json"
+        stale.write_bytes(b"{}")
+        (self.registry.site / "planr/stale.html").write_bytes(b"<p>stale</p>")
+        registry.purge_mutable(self.registry.site, {"planr"})
+        self.assertFalse(stale.exists())
+        self.assertFalse((self.registry.site / "planr" / pages.PAGE_NAME).exists())
+        self.assertFalse((self.registry.site / "planr/latest").exists())
+
+    def test_a_prerelease_is_listed_without_moving_an_alias(self):
+        self.registry.publish(key("1.4.2"))
+        self.registry.publish(key("1.5.0-rc.1"))
+        self.registry.apply()
+        line = self.page("planr/v1/index.html")
+        self.assertIn("1.5.0-rc.1", line)
+        self.assertIn("prerelease", line)
+        self.assertIn("serving 1.4.2", line)
+
+    def test_a_second_run_changes_no_byte_anywhere(self):
+        """The scheduled audit reconciles a tree it has already reconciled.  Anything
+        unstable in a derived resource -- a timestamp, an unordered set -- would show up
+        as a publication commit every night, so the whole tree is asserted, not just
+        the pages that prompted the test."""
+        self.registry.publish(key("1.4.2"))
+        self.registry.publish(key("2.0.0"))
+        self.registry.publish(key("2.1.0-rc.1"))
+        self.registry.apply()
+
+        def digest():
+            return {
+                path.relative_to(self.registry.site).as_posix(): path.read_bytes()
+                for path in self.registry.site.rglob("*") if path.is_file()
+            }
+
+        before = digest()
+        self.registry.apply()
+        self.assertEqual(before, digest())
+
+    def test_a_project_name_is_escaped_rather_than_interpolated(self):
+        """Project names are already constrained to a safe segment, so this is a second
+        line rather than the first -- but a page is HTML and the escaping belongs here."""
+        body = pages._entry("a&b<c>", "a&b<c>/", 'x"y')
+        self.assertIn("a&amp;b&lt;c&gt;", body)
+        self.assertNotIn("<c>", body)
 
 
 class GateTests(unittest.TestCase):
