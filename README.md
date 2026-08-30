@@ -107,7 +107,9 @@ configured in `manifest.toml`, and run **once, on the artifact being admitted**.
 
 A rule added later never re-applies to bytes that are already frozen. Nothing about the
 contract is language-specific — a CDDL linter can be a Rust binary without the registry
-knowing what language it is written in. A suffix with no linter publishes unchecked;
+knowing what language it is written in. A bare `python`/`python3` is the one exception:
+it resolves to the interpreter running the registry rather than to whatever `PATH` says,
+so the linter shares the environment that `pip install '.[lint]'` populated. A suffix with no linter publishes unchecked;
 `plan` reports that as `unlinted` rather than implying a pass.
 
 `lint/jsonschema_lint.py` checks that a document parses, declares a `$schema`, satisfies
@@ -303,10 +305,6 @@ python -m venv .venv
 
 The registry itself is pure standard library. `jsonschema` is an optional extra needed
 only by the JSON Schema linter, which runs as a separate process.
-
-`--allow-undeclared` tolerates published releases that carry no lock. It exists for the
-migration onto the manifest tree and should be removed once every published release is
-declared — otherwise it is the break-glass flag this design deliberately does not have.
 
 Components:
 

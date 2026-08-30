@@ -6,7 +6,7 @@ what any schema means.  Meaning is the linter's business, and it has its own tes
 """
 
 import hashlib
-import importlib
+import importlib.util
 import io
 import json
 import sys
@@ -126,10 +126,7 @@ class Registry:
 
     def plan(self, **kwargs) -> reconcile.Plan:
         published = registry.read_published(self.site) if self.site.is_dir() else {}
-        return reconcile.plan(
-            reconcile.declared(self.root), published,
-            enforce_undeclared=kwargs.pop("enforce_undeclared", True),
-        )
+        return reconcile.plan(reconcile.declared(self.root), published)
 
     def read(self, relative: str) -> dict:
         return json.loads((self.site / relative).read_text())
@@ -368,14 +365,6 @@ class ReconcileTests(TempCase):
         with self.assertRaises(ImmutabilityError):
             self.registry.apply()
 
-    def test_undeclared_releases_are_tolerated_during_migration_only(self):
-        release = key("1.4.2")
-        self.registry.publish(release)
-        self.registry.apply()
-        self.registry.undeclare(release)
-        self.assertTrue(self.registry.plan().halt)
-        self.assertFalse(self.registry.plan(enforce_undeclared=False).halt)
-
     def test_the_manifest_tree_holds_only_locks(self):
         stray = self.root / reconcile.MANIFEST_ROOT / "planr" / "v1" / "1.4.2" / "notes.md"
         stray.parent.mkdir(parents=True)
@@ -407,18 +396,19 @@ class AliasTests(TempCase):
         self.registry.apply()
         self.assertEqual(self.registry.read("planr/v2/index.json")["schemas"], [])
 
-    def test_dropping_a_lock_does_not_take_its_alias_down(self):
+    def test_an_alias_serves_a_release_no_longer_named_by_the_manifest(self):
         """Aliases come from the tree, not the manifest, so the manifest never has to be
-        cumulative -- and removing an entry cannot 404 a URL the index advertises."""
-        release = key("1.4.2")
-        self.registry.publish(release)
+        cumulative: 1.4.1 keeps serving `legacy` after only 1.4.2 is being admitted."""
+        self.registry.publish(key("1.4.1"), ("planr.schema.json", "legacy.schema.json"))
         self.registry.apply()
-        self.registry.undeclare(release)
-        self.registry.apply(enforce_undeclared=False)
-        self.assertTrue((self.registry.site / "planr/v1/planr.schema.json").is_file())
-        self.assertEqual(
-            [s["version"] for s in self.registry.read("planr/v1/index.json")["schemas"]], ["1.4.2"]
-        )
+        self.registry.publish(key("1.4.2"), ("planr.schema.json",))
+        self.registry.apply()
+        self.assertTrue((self.registry.site / "planr/v1/legacy.schema.json").is_file())
+        records = {
+            s["schema"]: s["version"]
+            for s in self.registry.read("planr/v1/index.json")["schemas"]
+        }
+        self.assertEqual(records["legacy.schema.json"], "1.4.1")
 
     def test_a_schema_dropped_by_a_later_release_keeps_serving_from_the_last_one(self):
         self.registry.publish(key("1.4.1"), ("planr.schema.json", "legacy.schema.json"))
@@ -560,7 +550,14 @@ class LintTests(TempCase):
     def linters(self) -> dict[str, list[str]]:
         return {".schema.json": [sys.executable, str(ROOT / "lint" / "jsonschema_lint.py")]}
 
+    def require_jsonschema(self) -> None:
+        """The shipped JSON Schema linter needs the optional extra; the registry does
+        not.  A test that asserts on its diagnostics has to say so."""
+        if importlib.util.find_spec("jsonschema") is None:
+            self.skipTest("jsonschema is not installed (pip install '.[lint]')")
+
     def test_a_schema_filed_at_the_wrong_url_is_refused(self):
+        self.require_jsonschema()
         release = key("1.4.2")
         wrong = schema_body(release, "planr.schema.json", id_url=f"{BASE_URL}/planr/v1/9.9.9/planr.schema.json")
         self.registry.publish(release, bodies={"planr.schema.json": wrong})
@@ -568,6 +565,7 @@ class LintTests(TempCase):
             self.registry.apply(config(self.linters()))
 
     def test_a_schema_that_fails_its_meta_schema_is_refused(self):
+        self.require_jsonschema()
         release = key("1.4.2")
         broken = json.dumps({
             "$schema": DIALECT, "$id": release.url(BASE_URL, "planr.schema.json"),
@@ -602,6 +600,20 @@ class LintTests(TempCase):
         )
         self.assertEqual(lint.unlinted({}, documents), ["planr.schema.json"])
         self.assertEqual(lint.unlinted(self.linters(), documents), [])
+
+    def test_a_bare_python_linter_runs_under_the_running_interpreter(self):
+        """`pip install '.[lint]'` populates this environment, so resolving the linter
+        against an ambient PATH is never what the config meant."""
+        self.assertEqual(lint.resolve(["python3", "l.py"]), [sys.executable, "l.py"])
+        self.assertEqual(lint.resolve(["python", "l.py"]), [sys.executable, "l.py"])
+
+    def test_any_other_linter_command_is_passed_through_untouched(self):
+        self.assertEqual(lint.resolve(["/usr/bin/cddl", "compile"]), ["/usr/bin/cddl", "compile"])
+
+    def test_a_missing_linter_is_reported_rather_than_silently_skipped(self):
+        self.registry.publish(key("1.4.2"))
+        with self.assertRaisesRegex(ValidationError, "linter not found"):
+            self.registry.apply(config({".schema.json": ["definitely-not-a-real-linter"]}))
 
     def test_an_unknown_suffix_cannot_be_configured(self):
         with self.assertRaisesRegex(ValidationError, "not a known suffix"):

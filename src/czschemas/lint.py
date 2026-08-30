@@ -22,6 +22,7 @@ knowing or caring.
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -29,6 +30,16 @@ from .model import SCHEMA_SUFFIXES, SchemaDocument, ValidationError
 
 
 LINT_TIMEOUT_SECONDS = 60
+# A linter invoked as a bare `python`/`python3` runs under the interpreter running the
+# registry, rather than whatever the ambient PATH resolves to.  `pip install '.[lint]'`
+# installs the linter's dependencies into *this* environment, so resolving elsewhere is
+# never what was meant.  Any other command -- an absolute path, or a binary in another
+# language -- is passed through untouched.
+PYTHON_NAMES = frozenset({"python", "python3"})
+
+
+def resolve(argv: list[str]) -> list[str]:
+    return [sys.executable, *argv[1:]] if argv[0] in PYTHON_NAMES else list(argv)
 
 
 def load(config: object) -> dict[str, list[str]]:
@@ -73,7 +84,7 @@ def check(
             url = document.key.url(base_url, document.basename)
             try:
                 result = subprocess.run(
-                    [*argv, str(target), url],
+                    [*resolve(argv), str(target), url],
                     capture_output=True,
                     text=True,
                     timeout=LINT_TIMEOUT_SECONDS,
@@ -81,7 +92,7 @@ def check(
                     check=False,
                 )
             except FileNotFoundError as error:
-                raise ValidationError(f"linter not found: {argv[0]!r}") from error
+                raise ValidationError(f"linter not found: {resolve(argv)[0]!r}") from error
             except subprocess.TimeoutExpired as error:
                 raise ValidationError(f"linter timed out on {document.basename}") from error
             if result.returncode != 0:

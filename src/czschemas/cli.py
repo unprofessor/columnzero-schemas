@@ -83,9 +83,7 @@ def command_plan(args) -> int:
     config = Config.load(args.config)
     declarations = reconcile.declared(args.manifest_root)
     published = registry.read_published(args.site) if args.site.is_dir() else {}
-    proposal = reconcile.plan(
-        declarations, published, enforce_undeclared=not args.allow_undeclared
-    )
+    proposal = reconcile.plan(declarations, published)
     admissions: list[reconcile.Admission] = []
     if not proposal.halt:
         # Only fetch once the plan is clean: a halt should cost no network.
@@ -100,12 +98,7 @@ def command_plan(args) -> int:
 
 def command_apply(args) -> int:
     config = Config.load(args.config)
-    result = reconcile.apply(
-        args.manifest_root,
-        args.site,
-        config,
-        enforce_undeclared=not args.allow_undeclared,
-    )
+    result = reconcile.apply(args.manifest_root, args.site, config)
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -133,12 +126,6 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--manifest-root", type=Path, default=Path("."))
         child.add_argument("--config", type=Path, default=Path("manifest.toml"))
         child.add_argument("--site", type=Path, default=Path("site"))
-        child.add_argument(
-            "--allow-undeclared",
-            action="store_true",
-            help="tolerate published releases with no lock in the manifest tree "
-                 "(migration only; remove once every release is declared)",
-        )
         child.set_defaults(handler=handler)
     sub.choices["plan"].add_argument(
         "--strict", action="store_true", help="exit non-zero when anything would change"

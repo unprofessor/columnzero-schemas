@@ -14,5 +14,8 @@ custom_domain = true
 #
 # A suffix with no linter publishes unchecked. That is the registry working as intended;
 # `plan` reports it as `unlinted` rather than implying a pass.
+#
+# A bare `python3` here means the interpreter running the registry, not whatever PATH
+# resolves to, so the linter shares the environment `pip install '.[lint]'` populated.
 [lint]
 ".schema.json" = ["python3", "lint/jsonschema_lint.py"]

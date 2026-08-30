@@ -89,8 +89,6 @@ def declared(manifest_root: Path) -> dict[ReleaseKey, Declaration]:
 def plan(
     declarations: dict[ReleaseKey, Declaration],
     published: dict[ReleaseKey, registry.PublishedRelease],
-    *,
-    enforce_undeclared: bool,
 ) -> Plan:
     """Compare the two trees.  Reads nothing but what the callers already hold."""
     admit: list[ReleaseKey] = []
@@ -103,8 +101,7 @@ def plan(
         if key not in published:
             admit.append(key)
         elif key not in declarations:
-            if enforce_undeclared:
-                halt.append(f"published but not declared: {key.path}")
+            halt.append(f"published but not declared: {key.path}")
         elif not published[key].is_complete:
             admit.append(key)
             backfill.add(key)
@@ -148,14 +145,13 @@ def apply(
     site: Path,
     config: Config,
     *,
-    enforce_undeclared: bool = True,
     on_download: Callable[[ArtifactLock], bytes] | None = None,
 ) -> dict[str, object]:
     """Reconcile in full: plan, admit, publish, then regenerate everything derived."""
     declarations = declared(manifest_root)
     site.mkdir(parents=True, exist_ok=True)
     published = registry.read_published(site)
-    proposal = plan(declarations, published, enforce_undeclared=enforce_undeclared)
+    proposal = plan(declarations, published)
     if proposal.halt:
         raise ValidationError("reconciliation refused:\n  " + "\n  ".join(proposal.halt))
 

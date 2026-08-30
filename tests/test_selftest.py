@@ -71,14 +71,10 @@ class SelfTestArtifactTests(unittest.TestCase):
 
     def test_the_declared_digest_matches_the_source_tree(self):
         """A changed schema must force a new release, not a silent republish."""
-        if not LOCK_PATH.is_file():
-            self.skipTest("the self-test artifact is not declared yet")
         lock = ArtifactLock.parse(LOCK_PATH.read_bytes(), str(LOCK_PATH))
         self.assertEqual(lock.sha256, hashlib.sha256(self.payload).hexdigest())
 
     def test_the_lock_lives_at_the_path_that_names_its_release(self):
-        if not LOCK_PATH.is_file():
-            self.skipTest("the self-test artifact is not declared yet")
         relative = LOCK_PATH.relative_to(ROOT / reconcile.MANIFEST_ROOT).parent.as_posix()
         key = ReleaseKey.from_path(relative)
         self.assertEqual(key.project, pack.PROJECT)
