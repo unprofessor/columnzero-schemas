@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schema registry</title>
+<style>
+:root { --fg:#16181d; --dim:#61666e; --bg:#fff; --line:#e3e6ea; --accent:#0b5fff; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg:#e6e8ec; --dim:#9aa1ab; --bg:#14161a; --line:#2a2e35; --accent:#7aa2ff; }
+}
+* { box-sizing: border-box; }
+body { margin:0 auto; padding:2.5rem 1.25rem 5rem; max-width:52rem; background:var(--bg);
+  color:var(--fg); line-height:1.55;
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,sans-serif; }
+a { color:var(--accent); text-decoration:none; }
+a:hover { text-decoration:underline; }
+code, .u { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.875em; }
+nav { font-size:.875rem; color:var(--dim); margin-bottom:1.5rem; }
+nav a { color:var(--dim); }
+h1 { font-size:1.5rem; margin:0 0 .25rem; letter-spacing:-.01em; }
+h2 { font-size:.75rem; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+  margin:2.5rem 0 .75rem; font-weight:600; }
+.lede { color:var(--dim); margin:0 0 1rem; }
+ul { list-style:none; padding:0; margin:0; }
+li { padding:.7rem 0; border-top:1px solid var(--line); }
+li:last-child { border-bottom:1px solid var(--line); }
+.name { font-weight:600; }
+.meta { color:var(--dim); font-size:.8125rem; margin-top:.15rem; }
+.u { display:block; color:var(--dim); font-size:.8125rem; margin-top:.2rem;
+  overflow-wrap:anywhere; }
+footer { margin-top:3.5rem; padding-top:1rem; border-top:1px solid var(--line);
+  color:var(--dim); font-size:.8125rem; }
+</style>
+</head>
+<body>
+<nav>schemas</nav>
+<h1>Schema registry</h1>
+<p class="lede">Immutable, digest-pinned JSON Schema releases.</p>
+<h2>Projects</h2>
+<ul>
+<li><div class="name"><a href="columnzero-schemas/">columnzero-schemas</a></div><div class="meta">1 compatibility line</div></li>
+</ul>
+<h2>Whole registry</h2>
+<ul><li><div class="name"><a href="catalog.json">catalog.json</a></div><div class="meta">Every published schema, one flat entry each.</div><code class="u">https://schemas.columnzero.com/catalog.json</code></li></ul>
+<footer>Immutable schema registry. Canonical URLs never change or disappear; alias URLs move forward with each release.</footer>
+</body>
+</html>
